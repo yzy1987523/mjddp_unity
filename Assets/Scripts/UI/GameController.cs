@@ -410,20 +410,20 @@ public class GameController : MonoBehaviour
         _nativeW = maxRight;
         _nativeH = maxBottom;
 
-        // 绘制顺序（决定 UGUI 遮挡）：
-        // 1) 先按层高 layer 升序 —— 高层牌整体盖住低层牌（叠层 z 轴）；
-        // 2) 同层内，让 右(x 大) + 下(y 小) 的牌排在后面（后绘制=覆盖在上），
-        //    这样右下方向的牌压住左上方向牌的阴影（阴影在牌的右下方）。
+        // 绘制顺序（决定 UGUI 遮挡 / sibling index）：
+        // 1) 先按层高 layer 升序 —— 底层先画，高层整体盖在低层之上（2.5D 叠层 z 轴）；
+        // 2) 同层内按网格阅读顺序：先从上到下（py 小=屏幕上方先画），再从左到右（px 小先画）。
+        //    下方、右侧的牌后画=覆盖在上，因此右下方向的牌压住左上方向牌的阴影（阴影在右下）。
         placed.Sort((a, b) =>
         {
             int la = a.t.layer, lb = b.t.layer;
             if (la != lb) return la.CompareTo(lb);
-            float ax = a.px - minX + tw * 0.5f - _nativeW * 0.5f; // 屏幕 x（右为正）
-            float bx = b.px - minX + tw * 0.5f - _nativeW * 0.5f;
-            if (ax != bx) return ax.CompareTo(bx);                // 右优先后画
-            float ay = -(a.py - minY + th * 0.5f) + _nativeH * 0.5f; // 屏幕 y（上为正）
-            float by = -(b.py - minY + th * 0.5f) + _nativeH * 0.5f;
-            return by.CompareTo(ay);                              // 下(cy 小)优先后画
+            float ay = a.py - minY;   // 布局 y（下为正），小=屏幕上方
+            float by = b.py - minY;
+            if (ay != by) return ay.CompareTo(by); // 上方先画，下方后画 → 下压上
+            float ax = a.px - minX;   // 布局 x（右为正），小=左
+            float bx = b.px - minX;
+            return ax.CompareTo(bx);  // 左侧先画，右侧后画 → 右压左
         });
 
         int span = placed.Count + 1;
