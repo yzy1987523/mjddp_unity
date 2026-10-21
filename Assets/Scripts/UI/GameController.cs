@@ -450,17 +450,11 @@ public class GameController : MonoBehaviour
     {
         _lastScreenW = Screen.width;
         _lastScreenH = Screen.height;
-        if (_boardRoot == null || _nativeW <= 0 || _nativeH <= 0) return;
+        if (_boardRoot == null) return;
 
-        float topH = 80f, botH = 96f, pad = _cfg.padding;
-        float availW = Screen.width - pad * 2f;
-        float availH = Screen.height - topH - botH - pad;
-        if (availW <= 0 || availH <= 0) return;
-
-        float s = Mathf.Min(availW / _nativeW, availH / _nativeH) * _cfg.zoom;
-        s = Mathf.Max(s, 0.05f);
-        _boardRoot.localScale = new Vector3(s, s, 1);
-        _boardRoot.anchoredPosition = new Vector2(0, (botH - topH) / 2f);
+        // 固定缩放 3（不再按屏幕自适应），牌阵整体放大 3 倍
+        _boardRoot.localScale = new Vector3(3f, 3f, 1f);
+        _boardRoot.anchoredPosition = new Vector2(0, (96f - 80f) / 2f);
     }
 
     // ---------- 事件处理 ----------
