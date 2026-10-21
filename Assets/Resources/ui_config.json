@@ -1,0 +1,14 @@
+{
+  "fit_to_screen": true,
+  "padding": 40,
+  "zoom": 1.0,
+  "tile_width": 40,
+  "tile_height": 56,
+  "face_width": 40,
+  "face_height": 64,
+  "shadow_x": 5,
+  "shadow_y": 7,
+  "layer_dx": 0,
+  "layer_dy": 0,
+  "layer_colors": ["#6b8cff", "#57c785", "#f5c542", "#ef6f6c"]
+}

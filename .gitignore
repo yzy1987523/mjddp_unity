@@ -1,0 +1,12 @@
+/.vs
+/.vsconfig
+/Assembly-CSharp-Editor.csproj
+/Assembly-CSharp.csproj
+/build
+/config.json
+/Library
+/Logs
+/mjddp_unity.slnx
+/Packages
+/Temp
+/UserSettings
