@@ -46,11 +46,6 @@ public class GameController : MonoBehaviour
     private RectTransform _boardRoot;
     private Font _font;
 
-    [Header("2.5D 层偏移滑条（运行时控制，可留空由代码自动创建）")]
-    public Slider layerDxSlider;
-    public Slider layerDySlider;
-    private Text _dxLabel;
-    private Text _dyLabel;
     private float _layerDx;
     private float _layerDy;
     private List<(TileOut t, GameObject go)> _placedView = new List<(TileOut t, GameObject go)>();
@@ -267,28 +262,6 @@ public class GameController : MonoBehaviour
         tts.sizeDelta = new Vector2(420, 90);
         _toast = AddText(_toastGO, "", 34);
         _toastGO.SetActive(false);
-
-        // 抬升量滑条（运行时控制 2.5D 层偏移：层越高抬得越多）。场景未挂则自动创建。
-        float defDx = (_cfg != null && _cfg.layer_dx != 0f) ? _cfg.layer_dx : 5f;
-        float defDy = (_cfg != null && _cfg.layer_dy != 0f) ? _cfg.layer_dy : 10f;
-        _layerDx = defDx;
-        _layerDy = defDy;
-        if (layerDxSlider == null)
-        {
-            layerDxSlider = CreateSlider(canvasTr, "层偏移X", 0f, 40f, defDx, out _dxLabel,
-                v => { _layerDx = v; if (_dxLabel != null) _dxLabel.text = "层偏移X " + v.ToString("F0"); LayoutTiles(); });
-            PositionSlider(layerDxSlider, 0f, 0.5f, 20f);
-        }
-        else
-            layerDxSlider.onValueChanged.AddListener(v => { _layerDx = v; LayoutTiles(); });
-        if (layerDySlider == null)
-        {
-            layerDySlider = CreateSlider(canvasTr, "层偏移Y", 0f, 40f, defDy, out _dyLabel,
-                v => { _layerDy = v; if (_dyLabel != null) _dyLabel.text = "层偏移Y " + v.ToString("F0"); LayoutTiles(); });
-            PositionSlider(layerDySlider, 0.5f, 1f, -20f);
-        }
-        else
-            layerDySlider.onValueChanged.AddListener(v => { _layerDy = v; LayoutTiles(); });
     }
 
     // ---------- 局流程 ----------
@@ -317,6 +290,10 @@ public class GameController : MonoBehaviour
         foreach (var c in children) Destroy(c.gameObject);
         _tiles.Clear();
         _placedView.Clear();
+
+        // 2.5D 层偏移取自配置（默认 x=0 纯垂直、y=5.5 每层上抬），不再运行时可调
+        _layerDx = (_cfg != null) ? _cfg.layer_dx : 0f;
+        _layerDy = (_cfg != null) ? _cfg.layer_dy : 0f;
 
         float tw = _cfg.tile_width;
         float th = _cfg.tile_height;
@@ -467,73 +444,6 @@ public class GameController : MonoBehaviour
         }
 
         FitBoard();
-    }
-
-    // 运行时创建一个标准 UGUI Slider（含 Background/Fill/Handle 子结构）。场景已挂则不会走到这里。
-    private Slider CreateSlider(Transform parent, string name, float min, float max, float val, out Text label, UnityEngine.Events.UnityAction<float> cb)
-    {
-        var go = MakeGO(name, parent);
-        var slider = go.AddComponent<Slider>();
-
-        var bg = MakeGO("Background", go.transform);
-        var bgImg = bg.AddComponent<Image>();
-        bgImg.color = new Color(0.3f, 0.3f, 0.3f, 0.6f);
-        var bgRT = bg.GetComponent<RectTransform>();
-        bgRT.anchorMin = Vector2.zero; bgRT.anchorMax = Vector2.one;
-        bgRT.offsetMin = Vector2.zero; bgRT.offsetMax = Vector2.zero;
-
-        var fillArea = MakeGO("FillArea", go.transform);
-        var faRT = fillArea.GetComponent<RectTransform>();
-        faRT.anchorMin = new Vector2(0f, 0.25f); faRT.anchorMax = new Vector2(1f, 0.75f);
-        faRT.offsetMin = Vector2.zero; faRT.offsetMax = Vector2.zero;
-        var fill = MakeGO("Fill", fillArea.transform);
-        var fillImg = fill.AddComponent<Image>();
-        fillImg.color = new Color(0.2f, 0.6f, 1f);
-        var fillRT = fill.GetComponent<RectTransform>();
-        fillRT.anchorMin = Vector2.zero; fillRT.anchorMax = Vector2.one;
-        fillRT.offsetMin = Vector2.zero; fillRT.offsetMax = Vector2.zero;
-        slider.fillRect = fillRT;
-
-        var handleArea = MakeGO("HandleSlideArea", go.transform);
-        var haRT = handleArea.GetComponent<RectTransform>();
-        haRT.anchorMin = new Vector2(0f, 0.5f); haRT.anchorMax = new Vector2(1f, 0.5f);
-        haRT.offsetMin = Vector2.zero; haRT.offsetMax = Vector2.zero;
-        var handle = MakeGO("Handle", handleArea.transform);
-        var handleImg = handle.AddComponent<Image>();
-        handleImg.color = Color.white;
-        var handleRT = handle.GetComponent<RectTransform>();
-        handleRT.anchorMin = new Vector2(0.5f, 0.5f); handleRT.anchorMax = new Vector2(0.5f, 0.5f);
-        handleRT.sizeDelta = new Vector2(20, 20);
-        slider.handleRect = handleRT;
-
-        slider.targetGraphic = bgImg;
-        slider.minValue = min;
-        slider.maxValue = max;
-        slider.value = val;
-        slider.onValueChanged.AddListener(cb);
-
-        label = MakeGO("Label", go.transform).AddComponent<Text>();
-        label.text = name + " " + val.ToString("F0");
-        label.fontSize = 18;
-        label.alignment = TextAnchor.MiddleCenter;
-        label.color = Color.white;
-        if (_font != null) label.font = _font;
-        var lblRT = label.gameObject.GetComponent<RectTransform>();
-        lblRT.anchorMin = new Vector2(0f, 1f); lblRT.anchorMax = new Vector2(1f, 1f);
-        lblRT.sizeDelta = new Vector2(0, 18); lblRT.anchoredPosition = new Vector2(0, 6);
-
-        return slider;
-    }
-
-    // 把滑条定位到屏幕底部两側（左半/右半），高度 40，置于底栏按钮上方。
-    private void PositionSlider(Slider slider, float aMinX, float aMaxX, float padX)
-    {
-        var rt = slider.GetComponent<RectTransform>();
-        rt.anchorMin = new Vector2(aMinX, 0f);
-        rt.anchorMax = new Vector2(aMaxX, 0f);
-        rt.pivot = new Vector2(aMinX, 0f);
-        rt.sizeDelta = new Vector2(-Mathf.Abs(padX), 40f);
-        rt.anchoredPosition = new Vector2(padX, 130f);
     }
 
     private void FitBoard()

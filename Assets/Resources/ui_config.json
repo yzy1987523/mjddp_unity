@@ -9,6 +9,6 @@
   "shadow_x": 5,
   "shadow_y": 7,
   "layer_dx": 0,
-  "layer_dy": 0,
+  "layer_dy": 5.5,
   "layer_colors": ["#6b8cff", "#57c785", "#f5c542", "#ef6f6c"]
 }
