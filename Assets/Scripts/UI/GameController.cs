@@ -50,6 +50,16 @@ public class GameController : MonoBehaviour
     private float _layerDy;
     private List<(TileOut t, GameObject go)> _placedView = new List<(TileOut t, GameObject go)>();
 
+    // 关卡 / 状态机
+    private enum GameState { Menu, LevelSelect, Playing, Paused, Result }
+    private GameState _state = GameState.Menu;
+    private LevelEntry[] _levels = new LevelEntry[0];
+    private int _currentLevel = 0;
+    private GameObject _topBar, _bottomBar;
+    private GameObject _menuPanel, _levelPanel, _pausePanel, _resultPanel;
+    private Text _resultTitle, _resultInfo;
+    private Button _pauseBtn, _nextBtn;
+
     private float _nativeW;
     private float _nativeH;
     private int _lastScreenW;
@@ -78,12 +88,12 @@ public class GameController : MonoBehaviour
         BuildUI();
         LoadResources();
         _best = SaveManager.LoadBest();
-        StartRound();
+        ShowMenu();
     }
 
     private void Update()
     {
-        if (Screen.width != _lastScreenW || Screen.height != _lastScreenH)
+        if (_state == GameState.Playing && (Screen.width != _lastScreenW || Screen.height != _lastScreenH))
             FitBoard();
     }
 
@@ -106,9 +116,7 @@ public class GameController : MonoBehaviour
             _faceSprites[i - 1] = LoadFirstSprite("Card/icon_" + i.ToString("D3"));
         }
 
-        var layoutAsset = Resources.Load<TextAsset>("mahjong-layout");
-        if (layoutAsset != null) _layoutData = JsonUtility.FromJson<LayoutData>(layoutAsset.text);
-        else Debug.LogError("GameController: 未找到 Resources/mahjong-layout.json");
+        LoadLevels();
 
         var cfgAsset = Resources.Load<TextAsset>("ui_config");
         if (cfgAsset != null) _cfg = JsonUtility.FromJson<ConfigData>(cfgAsset.text);
@@ -202,6 +210,7 @@ public class GameController : MonoBehaviour
 
         // 顶栏：分数 / 最高分 / 局数
         var top = MakeGO("TopBar", canvasTr);
+        _topBar = top;
         var ttr = top.GetComponent<RectTransform>();
         ttr.anchorMin = new Vector2(0, 1);
         ttr.anchorMax = new Vector2(1, 1);
@@ -223,6 +232,7 @@ public class GameController : MonoBehaviour
 
         // 底栏：提示 / 洗牌 / 重开
         var bottom = MakeGO("BottomBar", canvasTr);
+        _bottomBar = bottom;
         var btr = bottom.GetComponent<RectTransform>();
         btr.anchorMin = new Vector2(0, 0);
         btr.anchorMax = new Vector2(1, 0);
@@ -262,19 +272,29 @@ public class GameController : MonoBehaviour
         tts.sizeDelta = new Vector2(420, 90);
         _toast = AddText(_toastGO, "", 34);
         _toastGO.SetActive(false);
+
+        // 游戏中暂停按钮（顶栏右侧）
+        _pauseBtn = AddButton(top, "暂停");
+        var pLe = _pauseBtn.gameObject.AddComponent<LayoutElement>();
+        pLe.minHeight = 64; pLe.flexibleWidth = 1;
+        _pauseBtn.onClick.AddListener(OnPause);
+
+        BuildPanels(canvasTr);
+        SetGameUiVisible(false);
     }
 
     // ---------- 局流程 ----------
 
     private void StartRound()
     {
-        _round++;
+        _busy = false; // 新一局开始，清除通关/结算时的忙碌锁，恢复输入
+        _round = 1;
         _hints = HINTS_PER_ROUND;
         _combo = 0;
         BuildBoard();
         UpdateHud();
         FitBoard();
-        ShowToast("第 " + _round + " 局");
+        ShowToast(_levels != null && _currentLevel >= 0 && _currentLevel < _levels.Length ? _levels[_currentLevel].name : "第 1 局");
     }
 
     private void BuildBoard()
@@ -298,7 +318,8 @@ public class GameController : MonoBehaviour
         float tw = _cfg.tile_width;
         float th = _cfg.tile_height;
 
-        var gen = LevelGenerator.Generate(_layoutData, Random.Range(0, int.MaxValue));
+        int seed = (_levels != null && _currentLevel >= 0 && _currentLevel < _levels.Length) ? _levels[_currentLevel].seed : Random.Range(0, int.MaxValue);
+        var gen = LevelGenerator.Generate(_layoutData, seed);
         if (!gen.ok)
         {
             Debug.LogError("GameController: 生成失败 -> " + gen.error);
@@ -461,7 +482,7 @@ public class GameController : MonoBehaviour
 
     private void OnTileClicked(string id)
     {
-        if (_busy || _board == null) return;
+        if (_busy || _state != GameState.Playing || _board == null) return;
         _board.Click(id);
     }
 
@@ -499,15 +520,15 @@ public class GameController : MonoBehaviour
         _busy = true;
         _score += ROUND_BONUS;
         if (_score > _best) { _best = _score; SaveManager.SaveBest(_best); }
+        SaveManager.SaveLevelBest(_currentLevel, _score);
+        if (_currentLevel + 1 < _levels.Length) SaveManager.UnlockLevel(_currentLevel + 1);
         UpdateHud();
-        ShowToast("本局通关! +" + ROUND_BONUS);
-        StartCoroutine(WaitThenNextRound());
+        ShowResult(true);
     }
 
     private void OnDeadlock()
     {
-        ShowToast("无解，自动洗牌");
-        DoShuffle();
+        ShowResult(false);
     }
 
     // ---------- 提示 / 洗牌 / 重开 ----------
@@ -577,7 +598,7 @@ public class GameController : MonoBehaviour
     private void OnRestart()
     {
         if (_busy) return;
-        StartRound();
+        StartLevel(_currentLevel);
     }
 
     private static void Shuffle(List<int> arr)
@@ -639,7 +660,7 @@ public class GameController : MonoBehaviour
     {
         if (_scoreLabel != null) _scoreLabel.text = "分数 " + _score;
         if (_bestLabel != null) _bestLabel.text = "最高 " + _best;
-        if (_roundLabel != null) _roundLabel.text = "第 " + _round + " 局";
+        if (_roundLabel != null) _roundLabel.text = (_levels != null && _currentLevel >= 0 && _currentLevel < _levels.Length) ? _levels[_currentLevel].name : "第 " + _round + " 局";
         if (_hintBtn != null)
         {
             var txt = _hintBtn.GetComponentInChildren<Text>();
@@ -660,5 +681,216 @@ public class GameController : MonoBehaviour
     {
         yield return new WaitForSeconds(1.2f);
         if (_toastGO != null) _toastGO.SetActive(false);
+    }
+
+    // ---------- 状态机 / 面板 ----------
+
+    private void SetGameUiVisible(bool v)
+    {
+        if (_topBar != null) _topBar.SetActive(v);
+        if (_bottomBar != null) _bottomBar.SetActive(v);
+        if (_boardRoot != null) _boardRoot.gameObject.SetActive(v);
+    }
+
+    private void HideAllPanels()
+    {
+        if (_menuPanel != null) _menuPanel.SetActive(false);
+        if (_levelPanel != null) _levelPanel.SetActive(false);
+        if (_pausePanel != null) _pausePanel.SetActive(false);
+        if (_resultPanel != null) _resultPanel.SetActive(false);
+    }
+
+    private GameObject MakePanel(Transform parent, string name)
+    {
+        var go = MakeGO(name, parent);
+        var tr = go.GetComponent<RectTransform>();
+        tr.anchorMin = Vector2.zero; tr.anchorMax = Vector2.one;
+        tr.offsetMin = Vector2.zero; tr.offsetMax = Vector2.zero;
+        var img = go.AddComponent<Image>();
+        img.color = new Color(0f, 0f, 0f, 0.7f);
+        var lg = go.AddComponent<VerticalLayoutGroup>();
+        lg.spacing = 20; lg.childAlignment = TextAnchor.MiddleCenter;
+        lg.padding = new RectOffset(40, 40, 40, 40);
+        return go;
+    }
+
+    private void PanelButton(GameObject panel, string label, UnityEngine.Events.UnityAction cb)
+    {
+        var b = AddButton(panel, label);
+        var le = b.gameObject.AddComponent<LayoutElement>();
+        le.minHeight = 72; le.preferredHeight = 72; le.flexibleWidth = 1;
+        b.onClick.AddListener(cb);
+    }
+
+    private void BuildPanels(Transform parent)
+    {
+        _menuPanel = MakePanel(parent, "MenuPanel");
+        AddText(_menuPanel, "麻将连连看", 64);
+        PanelButton(_menuPanel, "开始游戏", () => StartLevel(Mathf.Min(SaveManager.LoadMaxUnlocked(), Mathf.Max(0, _levels.Length - 1))));
+        PanelButton(_menuPanel, "选择关卡", ShowLevelSelect);
+
+        _levelPanel = MakePanel(parent, "LevelPanel");
+
+        _pausePanel = MakePanel(parent, "PausePanel");
+        PanelButton(_pausePanel, "继续", OnResume);
+        PanelButton(_pausePanel, "重开本关", OnRetry);
+        PanelButton(_pausePanel, "返回主菜单", OnToMenu);
+
+        _resultPanel = MakePanel(parent, "ResultPanel");
+        _resultTitle = AddText(_resultPanel, "", 56);
+        _resultInfo = AddText(_resultPanel, "", 32);
+        _nextBtn = AddButton(_resultPanel, "下一关");
+        var nle = _nextBtn.gameObject.AddComponent<LayoutElement>();
+        nle.minHeight = 72; nle.flexibleWidth = 1;
+        _nextBtn.onClick.AddListener(OnNextLevel);
+        PanelButton(_resultPanel, "重玩", OnRetry);
+        PanelButton(_resultPanel, "主菜单", OnToMenu);
+
+        HideAllPanels();
+        _menuPanel.SetActive(true);
+    }
+
+    private void ShowMenu()
+    {
+        _state = GameState.Menu;
+        HideAllPanels();
+        SetGameUiVisible(false);
+        _menuPanel.SetActive(true);
+    }
+
+    private void ShowLevelSelect()
+    {
+        _state = GameState.LevelSelect;
+        HideAllPanels();
+        SetGameUiVisible(false);
+        // 清空旧内容后重建
+        var children = new System.Collections.Generic.List<GameObject>();
+        for (int i = 0; i < _levelPanel.transform.childCount; i++) children.Add(_levelPanel.transform.GetChild(i).gameObject);
+        foreach (var c in children) Destroy(c);
+        AddText(_levelPanel, "选择关卡", 56);
+        int unlocked = SaveManager.LoadMaxUnlocked();
+        for (int i = 0; i < _levels.Length; i++)
+        {
+            int idx = i;
+            bool locked = i > unlocked;
+            var b = AddButton(_levelPanel, locked ? (_levels[i].name + " (未解锁)") : _levels[i].name);
+            var le = b.gameObject.AddComponent<LayoutElement>();
+            le.minHeight = 64; le.preferredHeight = 64; le.flexibleWidth = 1;
+            if (locked) b.interactable = false;
+            else b.onClick.AddListener(() => StartLevel(idx));
+        }
+        PanelButton(_levelPanel, "返回", ShowMenu);
+        _levelPanel.SetActive(true);
+    }
+
+    private void StartLevel(int idx)
+    {
+        if (_levels == null || idx < 0 || idx >= _levels.Length) { ShowMenu(); return; }
+        _currentLevel = idx;
+        _layoutData = _levels[idx].layout;
+        _score = 0;
+        _state = GameState.Playing;
+        HideAllPanels();
+        SetGameUiVisible(true);
+        StartRound();
+    }
+
+    private void OnPause()
+    {
+        if (_state != GameState.Playing) return;
+        _state = GameState.Paused;
+        _pausePanel.SetActive(true);
+    }
+
+    private void OnResume()
+    {
+        _state = GameState.Playing;
+        _pausePanel.SetActive(false);
+    }
+
+    private void OnToMenu()
+    {
+        ShowMenu();
+    }
+
+    private void OnRetry()
+    {
+        StartLevel(_currentLevel);
+    }
+
+    private void OnNextLevel()
+    {
+        if (_currentLevel + 1 < _levels.Length) StartLevel(_currentLevel + 1);
+        else ShowMenu();
+    }
+
+    private void ShowResult(bool win)
+    {
+        _state = GameState.Result;
+        bool hasNext = win && (_currentLevel + 1 < _levels.Length);
+        if (_resultTitle != null) _resultTitle.text = win ? "过关!" : "失败";
+        if (_resultInfo != null)
+        {
+            string info = "得分 " + _score + "\n最高 " + _best;
+            if (_levels != null && _currentLevel >= 0 && _currentLevel < _levels.Length)
+                info += "\n" + _levels[_currentLevel].name;
+            if (!win) info += "\n无解，本关失败";
+            _resultInfo.text = info;
+        }
+        if (_nextBtn != null) _nextBtn.gameObject.SetActive(hasNext);
+        HideAllPanels();
+        SetGameUiVisible(false);
+        _resultPanel.SetActive(true);
+    }
+
+    // ---------- 关卡加载（Resources/level/levelN.json） ----------
+
+    private class LevelEntry
+    {
+        public string name;
+        public int targetScore;
+        public int seed;
+        public LayoutData layout;
+    }
+
+    private void LoadLevels()
+    {
+        var assets = Resources.LoadAll<TextAsset>("level");
+        if (assets == null || assets.Length == 0)
+        {
+            Debug.LogError("GameController: 未找到 Resources/level/ 下的关卡文件");
+            _levels = new LevelEntry[0];
+            return;
+        }
+        var parsed = new List<(int order, LevelFile f)>();
+        foreach (var a in assets)
+        {
+            var f = JsonUtility.FromJson<LevelFile>(a.text);
+            if (f == null) continue;
+            parsed.Add((ExtractLevelOrder(a.name), f));
+        }
+        parsed.Sort((x, y) => x.order.CompareTo(y.order));
+        var list = new List<LevelEntry>();
+        foreach (var (order, f) in parsed)
+        {
+            var e = new LevelEntry();
+            e.name = string.IsNullOrEmpty(f.name) ? ("第" + order + "关") : f.name;
+            e.targetScore = f.targetScore;
+            e.seed = f.seed;
+            if (f.tiles != null && f.tiles.Length > 0)
+                e.layout = new LayoutData { tiles = f.tiles };
+            else
+                e.layout = LayoutFactory.MakeTower(f.cols, f.rows, f.layers);
+            list.Add(e);
+        }
+        _levels = list.ToArray();
+    }
+
+    private static int ExtractLevelOrder(string fileName)
+    {
+        int n = 0;
+        foreach (char c in fileName)
+            if (c >= '0' && c <= '9') n = n * 10 + (c - '0');
+        return n;
     }
 }
