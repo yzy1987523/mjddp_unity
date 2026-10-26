@@ -8,7 +8,15 @@
   "face_height": 64,
   "shadow_x": 5,
   "shadow_y": 7,
-  "layer_dx": 0,
-  "layer_dy": 5.5,
-  "layer_colors": ["#6b8cff", "#57c785", "#f5c542", "#ef6f6c"]
+  "layer_dx": -3.6,
+  "layer_dy": 5.3,
+  "flip_dur": 0.25,
+  "crashSideOffset": 55,
+  "liftDur": 0.15,
+  "collideDur": 0.10,
+  "shrinkScale": 0.3,
+  "shrinkDur": 0.14,
+  "flyDur": 0.25,
+  "pauseDur": 0.25,
+  "show_offset_sliders": false
 }

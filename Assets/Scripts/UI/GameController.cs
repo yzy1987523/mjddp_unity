@@ -8,7 +8,7 @@ using UnityEngine.UI;
 /// <summary>
 /// 完整游戏主控制器（Godot game_session.gd 的 C# 移植）。
 /// 无限随机模式：随机生成可解牌阵，全消即过关并自动进下一局，分数跨局累加。
-/// 不限时；提示（限次）高亮一对可消牌；死局自动洗牌，也可手动洗牌。
+/// 不限时；提示（限次）高亮一对可消牌；死局弹提示，玩家可洗牌或重开；也可手动洗牌。
 /// 最高分持久化。所有 UI 在运行时构建，场景文件无需引用本脚本。
 /// </summary>
 public class GameController : MonoBehaviour
@@ -23,6 +23,7 @@ public class GameController : MonoBehaviour
 
     private GameObject _tilePrefab;
     private Sprite _cardFront;
+    private Sprite[] _levelBacks = new Sprite[4];   // 等级0~3 对应的背面图（Resources/CardPanel/Level0..3）
     private Dictionary<int, Sprite> _faceSprites = new Dictionary<int, Sprite>();
     private LayoutData _layoutData;
     private ConfigData _cfg = new ConfigData();
@@ -42,13 +43,43 @@ public class GameController : MonoBehaviour
     private GameObject _toastGO;
     private Button _hintBtn;
     private Button _shuffleBtn;
+    private Transform _uiRoot;
+    private GameObject _deadlockOverlay;
     private Button _restartBtn;
     private RectTransform _boardRoot;
     private Font _font;
 
     private float _layerDx;
     private float _layerDy;
+    private Slider _xOffsetSlider; // 调试：X 轴层偏移滑条
+    private Slider _yOffsetSlider; // 调试：Y 轴层偏移滑条
+    private const float X_OFFSET_MIN = -40f, X_OFFSET_MAX = 40f;
+    private const float Y_OFFSET_MIN = -40f, Y_OFFSET_MAX = 40f;
+    private string _firstPick = "";                 // 当前选中的第一张牌 id
+    private Vector2 _asideOffset = new Vector2(40, 40); // 保留（兼容）
     private List<(TileOut t, GameObject go)> _placedView = new List<(TileOut t, GameObject go)>();
+
+    // 图鉴 / 对象池 / 音频
+    private int[] _codexCollected = new int[0];      // 每种花色收集数（按 faceIndex）
+    private Button _codexBtn;
+    private GameObject _codexPanel;
+    private AudioSource _audio;
+    private AudioClip _peng;
+    private AudioClip _bgm;
+    private AudioClip _fail;
+    private AudioClip _select0;
+    private AudioClip _select1;
+    private AudioSource _bgmSrc;     // 背景音乐专用音源（与音效分开，便于独立开关）
+    private SaveManager.SettingsData _settings;  // 设置数据（音乐/音效/震动/画质/语言）
+    private GameObject _settingsPanel;
+    private float _flipDur = 0.5f;   // 正反面翻转动画总时长（来自配置 flip_dur）
+    private List<TileView> _pool = new List<TileView>(); // 牌对象池
+    private static readonly Color[] CODE_COLORS = {
+        new Color(0.95f, 0.95f, 0.95f), // Lv0 白
+        new Color(0.40f, 0.85f, 0.40f), // Lv1 绿
+        new Color(0.40f, 0.60f, 1.00f), // Lv2 蓝
+        new Color(1.00f, 0.80f, 0.20f), // Lv3 金
+    };
 
     // 关卡 / 状态机
     private enum GameState { Menu, LevelSelect, Playing, Paused, Result }
@@ -57,8 +88,13 @@ public class GameController : MonoBehaviour
     private int _currentLevel = 0;
     private GameObject _topBar, _bottomBar;
     private GameObject _menuPanel, _levelPanel, _pausePanel, _resultPanel;
-    private Text _resultTitle, _resultInfo;
-    private Button _pauseBtn, _nextBtn;
+    private Button _pauseBtn;
+    // 面板组件引用（加载预制体后绑定）
+    private MenuPanel _menuPanelC;
+    private LevelSelectPanel _levelPanelC;
+    private PausePanel _pausePanelC;
+    private ResultPanel _resultPanelC;
+    private CodexPanel _codexPanelC;
 
     private float _nativeW;
     private float _nativeH;
@@ -85,9 +121,16 @@ public class GameController : MonoBehaviour
     private void Start()
     {
         _font = LoadBuiltinFont();
+        LoadResources(); // 先于 BuildUI：让 _cfg 在 BuildUI 建滑条时可用
+        _settings = SaveManager.LoadSettings(); // 提前加载：BuildUI 建设置面板时需读取开关状态
         BuildUI();
-        LoadResources();
         _best = SaveManager.LoadBest();
+        _codexCollected = SaveManager.LoadCodex();
+        EnsureCodexSize();
+        _audio = gameObject.AddComponent<AudioSource>();  // 音效音源
+        _bgmSrc = gameObject.AddComponent<AudioSource>(); // 背景音乐音源（独立开关）
+        ApplyAudioSettings();
+        ApplyQualitySetting();
         ShowMenu();
     }
 
@@ -118,10 +161,43 @@ public class GameController : MonoBehaviour
 
         LoadLevels();
 
-        var cfgAsset = Resources.Load<TextAsset>("ui_config");
-        if (cfgAsset != null) _cfg = JsonUtility.FromJson<ConfigData>(cfgAsset.text);
+        // 等级背面图：Resources/CardPanel/Level0..3.png（不同等级花色用不同背面）
+        for (int i = 0; i < _levelBacks.Length; i++)
+        {
+            var s = Resources.Load<Sprite>("CardPanel/Level" + i);
+            if (s != null) _levelBacks[i] = s;
+        }
 
-        _tilePrefab = Resources.Load<GameObject>("TilePrefab");
+        var cfgAsset = Resources.Load<TextAsset>("ui_config");
+        if (cfgAsset != null)
+        {
+            try
+            {
+                string txt = cfgAsset.text;
+                // Unity JsonUtility 对 UTF-8 BOM（\uFEFF）敏感，开头有它即报 Invalid value，先剥离
+                if (!string.IsNullOrEmpty(txt) && txt[0] == '\uFEFF') txt = txt.Substring(1);
+                _cfg = JsonUtility.FromJson<ConfigData>(txt);
+            }
+            catch (System.Exception e)
+            {
+                // Unity JsonUtility 在 JSON 语法错误（如文件含 UTF-8 BOM、// 注释、尾随逗号、true/TRUE 大小写）时会抛异常
+                Debug.LogError("[CFG] ui_config.json 解析失败：" + e.Message + "（请检查是否含 BOM/注释/尾随逗号，已退回默认配置）");
+                _cfg = new ConfigData();
+            }
+            if (_cfg == null) Debug.LogWarning("[CFG] ui_config.json 解析失败（检查 JSON 语法，如尾随逗号/缺引号），已退回默认配置");
+        }
+        else Debug.LogWarning("[CFG] 未找到 Resources/ui_config，已退回默认配置");
+
+        _peng = Resources.Load<AudioClip>("audio/effect/peng"); // 修正路径：资源在 Resources/audio/effect/peng.ogg
+        _bgm = Resources.Load<AudioClip>("audio/bgm/bgm_0");     // 背景音乐：Resources/audio/bgm/bgm_0.ogg
+
+        _fail = Resources.Load<AudioClip>("audio/effect/fail");     // 点击无效牌
+        _select0 = Resources.Load<AudioClip>("audio/effect/select0"); // 选中有效牌
+        _select1 = Resources.Load<AudioClip>("audio/effect/select1"); // 配对成功的第二张
+
+        _flipDur = (_cfg != null) ? _cfg.flip_dur : 0.5f; // 翻转用时（配置表 flip_dur）
+
+        _tilePrefab = Resources.Load<GameObject>("Prefab/TilePrefab");
     }
 
     private Sprite GetFaceSprite(int idx) => (_faceSprites.ContainsKey(idx) ? _faceSprites[idx] : null);
@@ -257,6 +333,35 @@ public class GameController : MonoBehaviour
         _shuffleBtn.onClick.AddListener(OnShuffle);
         _restartBtn.onClick.AddListener(OnRestart);
 
+        // X 轴层偏移滑条（调试用：实时重排，观察 2.5D 堆叠水平错位）
+        var xLabel = AddText(bottom, "X层偏移", 22);
+        float x0 = (_cfg != null) ? _cfg.layer_dx : 0f;
+        _xOffsetSlider = AddSlider(bottom.transform, "XOffsetSlider", X_OFFSET_MIN, X_OFFSET_MAX, x0, v =>
+        {
+            _layerDx = v;
+            LayoutTiles();
+        });
+        var xle = _xOffsetSlider.gameObject.AddComponent<LayoutElement>();
+        xle.minHeight = 36; xle.preferredWidth = 240; xle.flexibleWidth = 1;
+
+        // Y 轴层偏移滑条（调试用：实时重排，观察 2.5D 堆叠高度）
+        var yLabel = AddText(bottom, "Y层偏移", 22);
+        float y0 = (_cfg != null) ? _cfg.layer_dy : 0f;
+        _yOffsetSlider = AddSlider(bottom.transform, "YOffsetSlider", Y_OFFSET_MIN, Y_OFFSET_MAX, y0, v =>
+        {
+            _layerDy = v;
+            LayoutTiles();
+        });
+        var yle = _yOffsetSlider.gameObject.AddComponent<LayoutElement>();
+        yle.minHeight = 36; yle.preferredWidth = 240; yle.flexibleWidth = 1;
+
+        // 调试滑条显隐：由配置 show_offset_sliders 统一控制（默认 false 不显示）
+        bool showSliders = (_cfg != null) ? _cfg.show_offset_sliders : false;
+        if (_xOffsetSlider != null) _xOffsetSlider.gameObject.SetActive(showSliders);
+        if (xLabel != null) xLabel.gameObject.SetActive(showSliders);
+        if (_yOffsetSlider != null) _yOffsetSlider.gameObject.SetActive(showSliders);
+        if (yLabel != null) yLabel.gameObject.SetActive(showSliders);
+
         // 牌盘容器
         var br = MakeGO("BoardRoot", canvasTr);
         var brtr = br.GetComponent<RectTransform>();
@@ -279,6 +384,11 @@ public class GameController : MonoBehaviour
         pLe.minHeight = 64; pLe.flexibleWidth = 1;
         _pauseBtn.onClick.AddListener(OnPause);
 
+        _codexBtn = AddButton(top, "图鉴");
+        var cLe = _codexBtn.gameObject.AddComponent<LayoutElement>();
+        cLe.minHeight = 64; cLe.flexibleWidth = 1;
+        _codexBtn.onClick.AddListener(ShowCodex);
+
         BuildPanels(canvasTr);
         SetGameUiVisible(false);
     }
@@ -287,6 +397,7 @@ public class GameController : MonoBehaviour
 
     private void StartRound()
     {
+        PlayBgm(); // 游戏开始播放背景音乐
         _busy = false; // 新一局开始，清除通关/结算时的忙碌锁，恢复输入
         _round = 1;
         _hints = HINTS_PER_ROUND;
@@ -305,15 +416,18 @@ public class GameController : MonoBehaviour
             return;
         }
 
-        var children = new List<GameObject>();
-        for (int i = 0; i < _boardRoot.childCount; i++) children.Add(_boardRoot.GetChild(i).gameObject);
-        foreach (var c in children) Destroy(c.gameObject);
+        // 回收所有现有牌到对象池（不销毁实例）
+        foreach (var kv in _tiles) ReleaseTile(kv.Value);
         _tiles.Clear();
         _placedView.Clear();
 
         // 2.5D 层偏移取自配置（默认 x=0 纯垂直、y=5.5 每层上抬），不再运行时可调
         _layerDx = (_cfg != null) ? _cfg.layer_dx : 0f;
         _layerDy = (_cfg != null) ? _cfg.layer_dy : 0f;
+        _firstPick = "";
+        _asideOffset = (_cfg != null) ? new Vector2(_cfg.tile_width * 0.8f, _cfg.tile_height * 0.8f) : new Vector2(40f, 40f);
+        if (_xOffsetSlider != null) _xOffsetSlider.value = _layerDx; // 重开本关时滑条回到配置默认值
+        if (_yOffsetSlider != null) _yOffsetSlider.value = _layerDy; // 重开本关时滑条回到配置默认值
 
         float tw = _cfg.tile_width;
         float th = _cfg.tile_height;
@@ -337,22 +451,21 @@ public class GameController : MonoBehaviour
         // 仅创建牌（含预制体 Shadow/Body/Face 与 TileView），定位交给 LayoutTiles
         foreach (var t in gen.tiles)
         {
-            GameObject tileGO;
-            if (_tilePrefab != null)
-                tileGO = Instantiate(_tilePrefab, _boardRoot);
-            else
-                tileGO = MakeGO(t.id, _boardRoot);
-            tileGO.name = t.id;
-            var tr = tileGO.GetComponent<RectTransform>();
+            TileView tv = GetTile();
+            tv.tileId = t.id;
+            tv.faceIndex = t.tileType;
+            tv.ResetView();
+            tv.transform.SetParent(_boardRoot, false);
+            var tr = tv.GetComponent<RectTransform>();
             tr.anchorMin = tr.anchorMax = new Vector2(0.5f, 0.5f);
             tr.pivot = new Vector2(0.5f, 0.5f);
             tr.sizeDelta = new Vector2(tw, th);
 
             // 阴影层：完全按预制体生成（尺寸/锚点/偏移/颜色都由你微调），代码只回填缺失的牌底图
-            Image shadowImg = tileGO.transform.Find("Shadow")?.GetComponent<Image>();
+            Image shadowImg = FindDeep(tv.transform, "Shadow")?.GetComponent<Image>();
             if (shadowImg == null)
             {
-                shadowImg = MakeGO("Shadow", tileGO.transform).AddComponent<Image>();
+                shadowImg = MakeGO("Shadow", tv.transform).AddComponent<Image>();
                 shadowImg.color = new Color(0f, 0f, 0f, 0.35f);
                 shadowImg.preserveAspect = true;
             }
@@ -360,38 +473,51 @@ public class GameController : MonoBehaviour
             shadowImg.raycastTarget = false;
             // 牌内绘制顺序（Shadow 在最下）由预制体 RootOrder 决定，代码不再强制
 
-            // 牌底：完全按预制体生成，代码仅回填缺失的牌底图
-            Image bodyImg = tileGO.transform.Find("Body")?.GetComponent<Image>();
-            if (bodyImg == null)
-            {
-                bodyImg = MakeGO("Body", tileGO.transform).AddComponent<Image>();
-                bodyImg.color = Color.white;
-                bodyImg.preserveAspect = true;
-            }
-            if (bodyImg.sprite == null) bodyImg.sprite = _cardFront;
-            bodyImg.raycastTarget = true;
+            // 牌底：完全由预制体提供，代码只引用、不新建也不覆盖其图片（去掉 bodyImg 的新增逻辑）
+            Image bodyImg = FindDeep(tv.transform, "Body (2)")?.GetComponent<Image>();
+            if (bodyImg == null) bodyImg = FindDeep(tv.transform, "Body")?.GetComponent<Image>();
+            if (bodyImg == null) bodyImg = FindDeep(tv.transform, "Body_1")?.GetComponent<Image>(); // 回退到 Body_1 层
+            if (bodyImg != null) bodyImg.raycastTarget = true;
 
             // 牌面：牌面 sprite 必须按 tileType 绑定（每张不同），其余完全按预制体
-            Image faceImg = tileGO.transform.Find("Face")?.GetComponent<Image>();
+            Image faceImg = FindDeep(tv.transform, "Face")?.GetComponent<Image>();
             if (faceImg == null)
             {
-                faceImg = MakeGO("Face", tileGO.transform).AddComponent<Image>();
+                faceImg = MakeGO("Face", tv.transform).AddComponent<Image>();
                 faceImg.preserveAspect = true;
             }
             faceImg.sprite = GetFaceSprite(t.tileType);
             faceImg.raycastTarget = false;
 
-            var tv = tileGO.GetComponent<TileView>();
-            if (tv == null) tv = tileGO.AddComponent<TileView>();
-            tv.tileId = t.id;
-            tv.faceIndex = t.tileType;
             tv.bodyImage = bodyImg;
             tv.faceImage = faceImg;
-            tv.SetBaseColor(bodyImg.color); // 记住预制体底色，选中取消后恢复
+            tv.backImage = FindDeep(tv.transform, "Back")?.GetComponent<Image>();
+            tv.shadowImage = FindDeep(tv.transform, "Shadow")?.GetComponent<Image>();
+            tv.point = FindDeep(tv.transform, "Point");
+            tv.SetBaseColor(bodyImg != null ? bodyImg.color : Color.white); // 记住预制体底色，选中取消后恢复
             tv.onClick = OnTileClicked;
 
+            // 图鉴等级 -> 等级背面图 levelN（不同等级花色 Back 颜色不同，共 4 种）
+            int lvl = LevelOf(t.tileType < _codexCollected.Length ? _codexCollected[t.tileType] : 0);
+            Sprite lvlBack = (lvl >= 0 && lvl < _levelBacks.Length) ? _levelBacks[lvl] : null;
+
+            // 记录新增子层引用（翻转时由 TileView.ToggleFace 按状态统一设置 sprite）
+            tv.bodySub1 = FindDeep(tv.transform, "Body_1")?.GetComponent<Image>();
+            tv.bodySub2 = FindDeep(tv.transform, "Body_2")?.GetComponent<Image>();
+            tv.backSub1 = FindDeep(tv.transform, "Back_1")?.GetComponent<Image>();
+            tv.backSub2 = FindDeep(tv.transform, "Back_2")?.GetComponent<Image>();
+
+            // 正面牌底图（front）与等级背面图（levelN = backSprite），供 ToggleFace 按状态设置各层
+            tv.frontSprite = bodyImg != null ? bodyImg.sprite : null;
+            tv.backSprite = lvlBack;
+
+            tv.ToggleFace(true); // 默认正面：body/body_1/body_2=front，back/back_1/back_2=levelN
+
+            // 随机 10% 的牌初始为反面状态（ToggleFace(false) 后 body/body_1/body_2=levelN）
+            if (Random.value < 0.1f) tv.SetFaceDownInitial();
+
             _tiles[t.id] = tv;
-            _placedView.Add((t, tileGO));
+            _placedView.Add((t, tv.gameObject));
         }
 
         LayoutTiles();
@@ -458,6 +584,8 @@ public class GameController : MonoBehaviour
             var go = _tiles[p.t.id].gameObject;
             var tr = go.GetComponent<RectTransform>();
             tr.anchoredPosition = new Vector2(cx, cy);
+            var tvh = go.GetComponent<TileView>();
+            if (tvh != null) tvh.homePos = new Vector2(cx, cy); // 记录原位供抬起/放回动画
             // 层号越大 → sibling index 越大 → UGUI 越后绘制（覆盖在低层之上）。
             int ord = layerCounter.TryGetValue(p.t.layer, out int o) ? o : 0;
             layerCounter[p.t.layer] = ord + 1;
@@ -480,10 +608,132 @@ public class GameController : MonoBehaviour
 
     // ---------- 事件处理 ----------
 
+    // 点击编排：第一张只变色（不移动）；第二张也只变色；相同则执行碰撞消除；
+    // 不同或第二张不可点（不符合规则）则前一张取消变色。
     private void OnTileClicked(string id)
     {
         if (_busy || _state != GameState.Playing || _board == null) return;
-        _board.Click(id);
+        if (!_board.IsFree(id)) { OnPickBlocked(id); return; }
+        var tv = _tiles[id];
+        // 反面牌：先翻转为正面（0.5s），翻转期间锁输入；完成后再走正常选牌流程
+        if (!tv.IsFaceUp())
+        {
+            _busy = true;
+            tv.FlipToFront(_flipDur, () => { _busy = false; if (_tiles.ContainsKey(id)) OnTileClicked(id); });
+            return;
+        }
+        if (_firstPick == "")
+        {
+            _firstPick = id;
+            SelectTile(id);
+            PlaySelect0(); // 点击有效牌：播放选中音效
+            return;
+        }
+        if (_firstPick == id) { DeselectTile(id); RevertIfFaceDown(id); _firstPick = ""; return; }
+        string a = _firstPick, b = id;
+        if (_board.GetFace(a) == _board.GetFace(b))
+        {
+            _firstPick = "";
+            DeselectTile(a); // 选中牌配对成功，先恢复白色再播放碰撞动画
+            DeselectTile(b);
+            PlaySelect1(); // 配对成功的第二张牌：播放选中音效
+            StartCrash(a, b);
+        }
+        else
+        {
+            DeselectTile(a);
+            RevertIfFaceDown(a);
+            _firstPick = b;
+            SelectTile(b);
+            PlaySelect0(); // 第二张也是有效牌（成为新第一张），播放选中音效
+        }
+    }
+
+    // 若本是反面牌（被翻转成正面选中），取消选中时切回反面状态
+    private void RevertIfFaceDown(string id)
+    {
+        if (_tiles.ContainsKey(id))
+        {
+            var tv = _tiles[id];
+            if (tv.wasFaceDown && tv.IsFaceUp()) tv.FlipToBack(_flipDur);
+        }
+    }
+
+    private void SelectTile(string id) { if (_tiles.ContainsKey(id)) _tiles[id].SetSelected(true); }
+    private void DeselectTile(string id) { if (_tiles.ContainsKey(id)) _tiles[id].SetSelected(false); }
+    private void ReturnFirst() { if (_firstPick != "") { RevertIfFaceDown(_firstPick); DeselectTile(_firstPick); _firstPick = ""; } }
+
+    // 第二张不符合点击规则：前面的牌取消变色，当前牌闪红提示
+    private void OnPickBlocked(string id)
+    {
+        ReturnFirst();
+        PlayFail(); // 点击无效牌：播放失败音效
+        if (_tiles.ContainsKey(id)) StartCoroutine(FlashBlocked(_tiles[id]));
+    }
+
+    // 配对成功：抬起 -> 移到中央点左右目标点 -> 一起相撞 -> 音效+缩小 -> 飞向图鉴按钮回收
+    private void StartCrash(string a, string b)
+    {
+        _busy = true;
+        _board.RemovePair(a, b); // 清数据 + 触发 OnMatched（计分 + 图鉴收集）
+        StartCoroutine(CrashSequence(a, b));
+    }
+
+    private IEnumerator CrashSequence(string a, string b)
+    {
+        var ta = _tiles[a];
+        var tb = _tiles[b];
+        ta.transform.SetAsLastSibling(); // 提到最高层，避免被其它牌遮挡（UGUI 同级后绘制者在上）
+        tb.transform.SetAsLastSibling();
+        var ra = ta.GetComponent<RectTransform>().anchoredPosition;
+        var rb = tb.GetComponent<RectTransform>().anchoredPosition;
+        var mid = (ra + rb) * 0.5f;
+        float X = (_cfg != null) ? _cfg.crashSideOffset : 40f;
+        var L = mid + new Vector2(-X, 0);
+        var R = mid + new Vector2(X, 0);
+        bool aLeft = ra.x <= rb.x;
+        // 目标点约束：左目标点不得比左侧牌更靠左、右目标点不得比右侧牌更靠右，
+        // 避免牌反向越过自身（左侧牌在左目标点右侧时，左目标点取左侧牌的 X；右侧同理）
+        float leftX = aLeft ? ra.x : rb.x;
+        float rightX = aLeft ? rb.x : ra.x;
+        if (leftX < L.x) L.x = leftX-15f;
+        if (rightX > R.x) R.x = rightX+15f;
+        var aTarget = aLeft ? L : R;
+        var bTarget = aLeft ? R : L;
+        float liftDur = _cfg != null ? _cfg.liftDur : 0.15f;
+        float collideDur = _cfg != null ? _cfg.collideDur : 0.14f;
+        float shrinkScale = _cfg != null ? _cfg.shrinkScale : 0.3f;
+        float shrinkDur = _cfg != null ? _cfg.shrinkDur : 0.14f;
+        float flyDur = _cfg != null ? _cfg.flyDur : 0.45f;
+        float pauseDur = _cfg != null ? _cfg.pauseDur : 0.5f;
+
+        // 阶段1：抬起（隐藏阴影）并移到各自左右目标点
+        ta.Lift(); ta.MoveTo(aTarget, liftDur);
+        tb.Lift(); tb.MoveTo(bTarget, liftDur);
+        yield return new WaitForSeconds(liftDur);
+        yield return new WaitForSeconds(pauseDur); // 移到目标点后停顿，再相撞
+
+        // 阶段2：一起相撞到中央点（严格等待两牌移动协程完成，时长 = collideDur）
+        bool ca2 = false, cb2 = false;
+        ta.MoveTo(mid, collideDur, () => ca2 = true);
+        tb.MoveTo(mid, collideDur, () => cb2 = true);
+        yield return new WaitUntil(() => ca2 && cb2);
+
+        // 阶段3：碰撞瞬间播放音效并平滑缩小
+        PlayPeng();
+        ta.TweenScale(shrinkScale, shrinkDur);
+        tb.TweenScale(shrinkScale, shrinkDur);
+        yield return new WaitForSeconds(shrinkDur);
+
+        // 阶段4：缩小后飞向图鉴按钮位置后回收（对象池）
+        Vector2 codexLocal = _boardRoot.InverseTransformPoint(_codexBtn.transform.position);
+        ta.MoveTo(codexLocal, flyDur, () => ReleaseTileById(a));
+        tb.MoveTo(codexLocal, flyDur, () => ReleaseTileById(b));
+        yield return new WaitForSeconds(flyDur);
+
+        if (_board.IsWin()) OnWin();
+        else if (!_board.HasValidMove()) OnDeadlock();
+        if (_state == GameState.Playing) _busy = false;
     }
 
     private void OnSelectionChanged(string id, bool on)
@@ -493,9 +743,6 @@ public class GameController : MonoBehaviour
 
     private void OnMatched(string a, string b)
     {
-        StartCoroutine(RemoveTile(a));
-        StartCoroutine(RemoveTile(b));
-
         float now = Time.time;
         if (_combo > 0 && (now - _lastMatchTime) <= COMBO_SEC) _combo++;
         else _combo = 1;
@@ -506,6 +753,7 @@ public class GameController : MonoBehaviour
         if (_score > _best) { _best = _score; SaveManager.SaveBest(_best); }
         UpdateHud();
         ShowToast("+" + gain + "  连击x" + mult);
+        AddCodex(_board.GetFace(a), 2); // 收集 2 张同花色牌
     }
 
     private void OnBlocked(string id)
@@ -526,9 +774,41 @@ public class GameController : MonoBehaviour
         ShowResult(true);
     }
 
+    // 卡死（无解）时不直接判失败：弹提示并允许玩家洗牌（救活）或重开本关
     private void OnDeadlock()
     {
-        ShowResult(false);
+        if (_deadlockOverlay != null) return;   // 已弹提示，避免重复
+        ShowDeadlockPrompt();
+    }
+
+    private void ShowDeadlockPrompt()
+    {
+        if (_uiRoot == null) { ShowToast("已无可消除，请洗牌或重开"); return; }
+        var ov = UiTools.MakePanel("DeadlockOverlay");
+        ov.transform.SetParent(_uiRoot, false);
+        // 全屏半透明 Image 默认拦截射线，提示框显示期间底层不可点，只能操作框内按钮
+        UiTools.AddText(ov.transform, "已无可消除的牌，卡死了！\n请点【洗牌】重排或【重开】本关", 28, Color.white);
+
+        var row = UiTools.MakeGO("Btns", ov.transform);
+        var hlg = row.AddComponent<HorizontalLayoutGroup>();
+        hlg.spacing = 24; hlg.childAlignment = TextAnchor.MiddleCenter;
+
+        var bShuffle = UiTools.AddButton(row.transform, "洗牌");
+        var leS = bShuffle.gameObject.AddComponent<LayoutElement>();
+        leS.minHeight = 64; leS.preferredHeight = 64; leS.flexibleWidth = 1;
+        bShuffle.onClick.AddListener(() => { CloseDeadlock(); _busy = false; DoShuffle(); });
+
+        var bRestart = UiTools.AddButton(row.transform, "重开");
+        var leR = bRestart.gameObject.AddComponent<LayoutElement>();
+        leR.minHeight = 64; leR.preferredHeight = 64; leR.flexibleWidth = 1;
+        bRestart.onClick.AddListener(() => { CloseDeadlock(); _busy = false; OnRestart(); });
+
+        _deadlockOverlay = ov;
+    }
+
+    private void CloseDeadlock()
+    {
+        if (_deadlockOverlay != null) { Destroy(_deadlockOverlay); _deadlockOverlay = null; }
     }
 
     // ---------- 提示 / 洗牌 / 重开 ----------
@@ -568,6 +848,7 @@ public class GameController : MonoBehaviour
     private void DoShuffle()
     {
         _busy = true;
+        ReturnFirst();
         _board.ClearSelection();
         foreach (var kv in _tiles) kv.Value.SetSelected(false);
 
@@ -636,9 +917,14 @@ public class GameController : MonoBehaviour
 
     private IEnumerator FlashBlocked(TileView tv)
     {
-        if (tv.bodyImage != null) tv.bodyImage.color = new Color(1f, 0.4f, 0.4f);
+        Color red = new Color(1f, 0.4f, 0.4f);
+        if (tv.bodyImage != null) tv.bodyImage.color = red;
+        if (tv.bodySub1 != null) tv.bodySub1.color = red;
+        if (tv.bodySub2 != null) tv.bodySub2.color = red;
         yield return new WaitForSeconds(0.25f);
         if (tv != null && tv.bodyImage != null) tv.bodyImage.color = Color.white;
+        if (tv != null && tv.bodySub1 != null) tv.bodySub1.color = Color.white;
+        if (tv != null && tv.bodySub2 != null) tv.bodySub2.color = Color.white;
     }
 
     private IEnumerator ClearHint(List<string> pair)
@@ -694,10 +980,32 @@ public class GameController : MonoBehaviour
 
     private void HideAllPanels()
     {
-        if (_menuPanel != null) _menuPanel.SetActive(false);
-        if (_levelPanel != null) _levelPanel.SetActive(false);
-        if (_pausePanel != null) _pausePanel.SetActive(false);
-        if (_resultPanel != null) _resultPanel.SetActive(false);
+        SetPanelVisible(_menuPanel, false);
+        SetPanelVisible(_levelPanel, false);
+        SetPanelVisible(_pausePanel, false);
+        SetPanelVisible(_resultPanel, false);
+        SetPanelVisible(_settingsPanel, false);
+        SetPanelVisible(_codexPanel, false);   // 修复：图鉴此前漏隐藏，导致开局就显示
+    }
+
+    // 用 CanvasGroup 的 alpha 控制面板显隐（而非 SetActive），便于淡入淡出且对象保持存活
+    private void SetPanelVisible(GameObject panel, bool visible)
+    {
+        if (panel == null) return;
+        var cg = panel.GetComponent<CanvasGroup>();
+        if (cg == null) { panel.SetActive(visible); return; }
+        cg.alpha = visible ? 1 : 0;
+        cg.interactable = visible;
+        cg.blocksRaycasts = visible;
+    }
+
+    // 确保面板根有 CanvasGroup；缺失时补加（不覆盖用户已调整的 prefab），并初始隐藏
+    private static void EnsureCanvasGroup(GameObject panel)
+    {
+        if (panel == null) return;
+        var cg = panel.GetComponent<CanvasGroup>();
+        if (cg == null) cg = panel.AddComponent<CanvasGroup>();
+        cg.alpha = 0; cg.interactable = false; cg.blocksRaycasts = false;
     }
 
     private GameObject MakePanel(Transform parent, string name)
@@ -722,32 +1030,99 @@ public class GameController : MonoBehaviour
         b.onClick.AddListener(cb);
     }
 
+    // ---------- 设置界面（参考设计稿：音乐/音效/震动开关 + 画质三档 + 语音 + 返回） ----------
+
+    private void ShowSettings()
+    {
+        if (_settingsPanel == null) return;
+        HideAllPanels();
+        SetPanelVisible(_settingsPanel, true);
+    }
+
+    // 加载设置面板预制体并实例化显示（预制体需由 Tools/生成设置面板预制体 生成；UI 已内置于 prefab）
+    private void LoadSettingsPrefab(Transform parent)
+    {
+        var prefab = Resources.Load<GameObject>("Prefab/SettingsPanel");
+        if (prefab == null)
+        {
+            Debug.LogError("[Settings] 未找到 Resources/SettingsPanel.prefab，请运行菜单 Tools / 生成设置面板预制体");
+            _settingsPanel = null;
+            return;
+        }
+        _settingsPanel = Instantiate(prefab, parent);
+        EnsureCanvasGroup(_settingsPanel);
+        var sp = _settingsPanel.GetComponent<SettingsPanel>();
+        if (sp != null) sp.Init(_settings,
+            onBack: ShowMenu,
+            onAudio: ApplyAudioSettings,
+            onQuality: ApplyQualitySetting,
+            onSave: () => SaveManager.SaveSettings(_settings));
+    }
+
     private void BuildPanels(Transform parent)
     {
-        _menuPanel = MakePanel(parent, "MenuPanel");
-        AddText(_menuPanel, "麻将连连看", 64);
-        PanelButton(_menuPanel, "开始游戏", () => StartLevel(Mathf.Min(SaveManager.LoadMaxUnlocked(), Mathf.Max(0, _levels.Length - 1))));
-        PanelButton(_menuPanel, "选择关卡", ShowLevelSelect);
-
-        _levelPanel = MakePanel(parent, "LevelPanel");
-
-        _pausePanel = MakePanel(parent, "PausePanel");
-        PanelButton(_pausePanel, "继续", OnResume);
-        PanelButton(_pausePanel, "重开本关", OnRetry);
-        PanelButton(_pausePanel, "返回主菜单", OnToMenu);
-
-        _resultPanel = MakePanel(parent, "ResultPanel");
-        _resultTitle = AddText(_resultPanel, "", 56);
-        _resultInfo = AddText(_resultPanel, "", 32);
-        _nextBtn = AddButton(_resultPanel, "下一关");
-        var nle = _nextBtn.gameObject.AddComponent<LayoutElement>();
-        nle.minHeight = 72; nle.flexibleWidth = 1;
-        _nextBtn.onClick.AddListener(OnNextLevel);
-        PanelButton(_resultPanel, "重玩", OnRetry);
-        PanelButton(_resultPanel, "主菜单", OnToMenu);
+        _uiRoot = parent;
+        LoadMenuPrefab(parent);
+        LoadLevelPrefab(parent);
+        LoadPausePrefab(parent);
+        LoadResultPrefab(parent);
+        LoadCodexPrefab(parent);
+        LoadSettingsPrefab(parent);
 
         HideAllPanels();
-        _menuPanel.SetActive(true);
+        SetPanelVisible(_menuPanel, true);
+    }
+
+    private void LoadMenuPrefab(Transform parent)
+    {
+        var prefab = Resources.Load<GameObject>("Prefab/MenuPanel");
+        if (prefab == null) { Debug.LogError("[UI] 未找到 Prefab/MenuPanel，请运行 Tools/生成 UI 预制体"); _menuPanel = null; return; }
+        _menuPanel = Instantiate(prefab, parent);
+        EnsureCanvasGroup(_menuPanel);
+        _menuPanelC = _menuPanel.GetComponent<MenuPanel>();
+        if (_menuPanelC != null) _menuPanelC.Init(
+            () => StartLevel(Mathf.Min(SaveManager.LoadMaxUnlocked(), Mathf.Max(0, _levels.Length - 1))),
+            ShowLevelSelect, ShowSettings);
+    }
+
+    private void LoadLevelPrefab(Transform parent)
+    {
+        var prefab = Resources.Load<GameObject>("Prefab/LevelPanel");
+        if (prefab == null) { Debug.LogError("[UI] 未找到 Prefab/LevelPanel，请运行 Tools/生成 UI 预制体"); _levelPanel = null; return; }
+        _levelPanel = Instantiate(prefab, parent);
+        EnsureCanvasGroup(_levelPanel);
+        _levelPanelC = _levelPanel.GetComponent<LevelSelectPanel>();
+        if (_levelPanelC != null) _levelPanelC.Init(ShowMenu);
+    }
+
+    private void LoadPausePrefab(Transform parent)
+    {
+        var prefab = Resources.Load<GameObject>("Prefab/PausePanel");
+        if (prefab == null) { Debug.LogError("[UI] 未找到 Prefab/PausePanel，请运行 Tools/生成 UI 预制体"); _pausePanel = null; return; }
+        _pausePanel = Instantiate(prefab, parent);
+        EnsureCanvasGroup(_pausePanel);
+        _pausePanelC = _pausePanel.GetComponent<PausePanel>();
+        if (_pausePanelC != null) _pausePanelC.Init(OnResume, OnRetry, OnToMenu);
+    }
+
+    private void LoadResultPrefab(Transform parent)
+    {
+        var prefab = Resources.Load<GameObject>("Prefab/ResultPanel");
+        if (prefab == null) { Debug.LogError("[UI] 未找到 Prefab/ResultPanel，请运行 Tools/生成 UI 预制体"); _resultPanel = null; return; }
+        _resultPanel = Instantiate(prefab, parent);
+        EnsureCanvasGroup(_resultPanel);
+        _resultPanelC = _resultPanel.GetComponent<ResultPanel>();
+        if (_resultPanelC != null) _resultPanelC.Init(OnNextLevel, OnRetry, OnToMenu, () => StartLevel(0));
+    }
+
+    private void LoadCodexPrefab(Transform parent)
+    {
+        var prefab = Resources.Load<GameObject>("Prefab/CodexPanel");
+        if (prefab == null) { Debug.LogError("[UI] 未找到 Prefab/CodexPanel，请运行 Tools/生成 UI 预制体"); _codexPanel = null; return; }
+        _codexPanel = Instantiate(prefab, parent);
+        EnsureCanvasGroup(_codexPanel);
+        _codexPanelC = _codexPanel.GetComponent<CodexPanel>();
+        if (_codexPanelC != null) _codexPanelC.Init(CloseCodex);
     }
 
     private void ShowMenu()
@@ -755,7 +1130,7 @@ public class GameController : MonoBehaviour
         _state = GameState.Menu;
         HideAllPanels();
         SetGameUiVisible(false);
-        _menuPanel.SetActive(true);
+        SetPanelVisible(_menuPanel, true);
     }
 
     private void ShowLevelSelect()
@@ -763,24 +1138,13 @@ public class GameController : MonoBehaviour
         _state = GameState.LevelSelect;
         HideAllPanels();
         SetGameUiVisible(false);
-        // 清空旧内容后重建
-        var children = new System.Collections.Generic.List<GameObject>();
-        for (int i = 0; i < _levelPanel.transform.childCount; i++) children.Add(_levelPanel.transform.GetChild(i).gameObject);
-        foreach (var c in children) Destroy(c);
-        AddText(_levelPanel, "选择关卡", 56);
-        int unlocked = SaveManager.LoadMaxUnlocked();
-        for (int i = 0; i < _levels.Length; i++)
+        if (_levelPanelC != null)
         {
-            int idx = i;
-            bool locked = i > unlocked;
-            var b = AddButton(_levelPanel, locked ? (_levels[i].name + " (未解锁)") : _levels[i].name);
-            var le = b.gameObject.AddComponent<LayoutElement>();
-            le.minHeight = 64; le.preferredHeight = 64; le.flexibleWidth = 1;
-            if (locked) b.interactable = false;
-            else b.onClick.AddListener(() => StartLevel(idx));
+            string[] names = new string[_levels.Length];
+            for (int i = 0; i < _levels.Length; i++) names[i] = _levels[i].name;
+            _levelPanelC.BuildList(names, SaveManager.LoadMaxUnlocked(), idx => StartLevel(idx));
         }
-        PanelButton(_levelPanel, "返回", ShowMenu);
-        _levelPanel.SetActive(true);
+        SetPanelVisible(_levelPanel, true);
     }
 
     private void StartLevel(int idx)
@@ -799,13 +1163,13 @@ public class GameController : MonoBehaviour
     {
         if (_state != GameState.Playing) return;
         _state = GameState.Paused;
-        _pausePanel.SetActive(true);
+        SetPanelVisible(_pausePanel, true);
     }
 
     private void OnResume()
     {
         _state = GameState.Playing;
-        _pausePanel.SetActive(false);
+        SetPanelVisible(_pausePanel, false);
     }
 
     private void OnToMenu()
@@ -828,19 +1192,15 @@ public class GameController : MonoBehaviour
     {
         _state = GameState.Result;
         bool hasNext = win && (_currentLevel + 1 < _levels.Length);
-        if (_resultTitle != null) _resultTitle.text = win ? "过关!" : "失败";
-        if (_resultInfo != null)
-        {
-            string info = "得分 " + _score + "\n最高 " + _best;
-            if (_levels != null && _currentLevel >= 0 && _currentLevel < _levels.Length)
-                info += "\n" + _levels[_currentLevel].name;
-            if (!win) info += "\n无解，本关失败";
-            _resultInfo.text = info;
-        }
-        if (_nextBtn != null) _nextBtn.gameObject.SetActive(hasNext);
+        bool isLast = win && (_currentLevel + 1 >= _levels.Length);
+        string info = "得分 " + _score + "\n最高 " + _best;
+        if (_levels != null && _currentLevel >= 0 && _currentLevel < _levels.Length)
+            info += "\n" + _levels[_currentLevel].name;
+        if (!win) info += "\n无解，本关失败";
+        if (_resultPanelC != null) _resultPanelC.Show(win, info, hasNext, isLast);
         HideAllPanels();
         SetGameUiVisible(false);
-        _resultPanel.SetActive(true);
+        SetPanelVisible(_resultPanel, true);
     }
 
     // ---------- 关卡加载（Resources/level/levelN.json） ----------
@@ -893,4 +1253,160 @@ public class GameController : MonoBehaviour
             if (c >= '0' && c <= '9') n = n * 10 + (c - '0');
         return n;
     }
+
+    // 递归查找子物体（Transform.Find 只查直接子级，预制体新增嵌套容器后会找不到）
+    private static Transform FindDeep(Transform root, string name)
+    {
+        foreach (Transform c in root)
+        {
+            if (c.name == name) return c;
+            var d = FindDeep(c, name);
+            if (d != null) return d;
+        }
+        return null;
+    }
+
+    private static void SetChildSprite(Transform root, string name, Sprite s)
+    {
+        if (s == null) return;
+        var img = FindDeep(root, name)?.GetComponent<Image>();
+        if (img != null) img.sprite = s;
+    }
+    private static void SetChildColor(Transform root, string name, Color c)
+    {
+        var img = FindDeep(root, name)?.GetComponent<Image>();
+        if (img != null) img.color = c;
+    }
+
+    // 自建最小可用 Slider（不依赖任何预制体），用于调试层偏移等实时调参
+    private Slider AddSlider(Transform parent, string name, float min, float max, float val, UnityEngine.Events.UnityAction<float> cb)
+    {
+        var go = MakeGO(name, parent);
+        var tr = go.GetComponent<RectTransform>();
+        tr.sizeDelta = new Vector2(240, 36);
+        var bg = MakeGO("Background", go.transform);
+        var bgr = bg.GetComponent<RectTransform>();
+        bgr.anchorMin = Vector2.zero; bgr.anchorMax = Vector2.one; bgr.offsetMin = Vector2.zero; bgr.offsetMax = Vector2.zero;
+        var bgImg = bg.AddComponent<Image>(); bgImg.color = new Color(1f, 1f, 1f, 0.18f);
+        var fillArea = MakeGO("FillArea", go.transform);
+        var far = fillArea.GetComponent<RectTransform>();
+        far.anchorMin = new Vector2(0f, 0.25f); far.anchorMax = new Vector2(1f, 0.75f); far.offsetMin = Vector2.zero; far.offsetMax = Vector2.zero;
+        var fill = MakeGO("Fill", fillArea.transform);
+        var filr = fill.GetComponent<RectTransform>();
+        filr.anchorMin = Vector2.zero; filr.anchorMax = Vector2.one; filr.offsetMin = Vector2.zero; filr.offsetMax = Vector2.zero;
+        var fillImg = fill.AddComponent<Image>(); fillImg.color = new Color(1f, 0.84f, 0.40f);
+        var handle = MakeGO("Handle", go.transform);
+        var hr = handle.GetComponent<RectTransform>();
+        hr.sizeDelta = new Vector2(24, 36); hr.anchorMin = new Vector2(0f, 0.5f); hr.anchorMax = new Vector2(0f, 0.5f); hr.pivot = new Vector2(0.5f, 0.5f);
+        var hImg = handle.AddComponent<Image>(); hImg.color = Color.white;
+        var slider = go.AddComponent<Slider>();
+        slider.minValue = min; slider.maxValue = max; slider.value = val;
+        slider.fillRect = filr;
+        slider.handleRect = hr;
+        slider.targetGraphic = hImg;
+        slider.onValueChanged.AddListener(cb);
+        return slider;
+    }
+
+    // ---------- 对象池 ----------
+
+    private TileView GetTile()
+    {
+        foreach (var p in _pool) if (p != null && !p.gameObject.activeSelf) { p.gameObject.SetActive(true); return p; }
+        GameObject go = _tilePrefab != null ? Instantiate(_tilePrefab, _boardRoot) : MakeGO("Tile", _boardRoot);
+        var tv = go.GetComponent<TileView>();
+        if (tv == null) tv = go.AddComponent<TileView>();
+        return tv;
+    }
+
+    private void ReleaseTile(TileView tv)
+    {
+        if (tv == null) return;
+        tv.gameObject.SetActive(false);
+        if (!_pool.Contains(tv)) _pool.Add(tv);
+    }
+
+    private void ReleaseTileById(string id)
+    {
+        if (!_tiles.ContainsKey(id)) return;
+        var tv = _tiles[id];
+        _tiles.Remove(id);
+        _placedView.RemoveAll(x => x.go == tv.gameObject);
+        ReleaseTile(tv);
+    }
+
+    private void PlayPeng()
+    {
+        if (_audio != null && _peng != null) _audio.PlayOneShot(_peng);
+        if (_settings != null && _settings.vibration && Application.isMobilePlatform) Handheld.Vibrate(); // 震动开关（仅移动端生效）
+    }
+    private void PlayFail() { if (_audio != null && _fail != null) _audio.PlayOneShot(_fail); }
+    private void PlaySelect0() { if (_audio != null && _select0 != null) _audio.PlayOneShot(_select0); }
+    private void PlaySelect1() { if (_audio != null && _select1 != null) _audio.PlayOneShot(_select1); }
+
+    // 游戏开始循环播放背景音乐（若已在播放则不重复触发）
+    private void PlayBgm()
+    {
+        if (_bgmSrc == null || _bgm == null) return;
+        if (_bgmSrc.clip != _bgm) { _bgmSrc.clip = _bgm; _bgmSrc.loop = true; }
+        if (!_bgmSrc.isPlaying) _bgmSrc.Play();
+    }
+
+    // 应用音频开关：音乐只作用于 bgm 音源，音效作用于所有 PlayOneShot
+    private void ApplyAudioSettings()
+    {
+        if (_settings == null) return;
+        if (_bgmSrc != null) _bgmSrc.mute = !_settings.music;
+        if (_audio != null) _audio.mute = !_settings.sfx;
+    }
+
+    // 应用画面质量档位（0低/1中/2高）
+    private void ApplyQualitySetting()
+    {
+        if (_settings == null) return;
+        int q = Mathf.Clamp(_settings.quality, 0, 2);
+        if (QualitySettings.names != null && QualitySettings.names.Length > 0)
+            QualitySettings.SetQualityLevel(Mathf.Min(q, QualitySettings.names.Length - 1), true);
+    }
+
+    // ---------- 图鉴 ----------
+
+    private void EnsureCodexSize()
+    {
+        if (_codexCollected.Length == _faceSprites.Count) return;
+        var tmp = new int[_faceSprites.Count];
+        for (int i = 0; i < tmp.Length && i < _codexCollected.Length; i++) tmp[i] = _codexCollected[i];
+        _codexCollected = tmp;
+    }
+
+    private void AddCodex(int face, int n)
+    {
+        if (face < 0 || face >= _codexCollected.Length) return;
+        _codexCollected[face] += n;
+        SaveManager.SaveCodex(_codexCollected);
+    }
+
+    private static int LevelOf(int count) => count >= 1000 ? 3 : (count >= 100 ? 2 : (count >= 10 ? 1 : 0));
+    private static Color CodexColor(int lvl) => CODE_COLORS[Mathf.Clamp(lvl, 0, CODE_COLORS.Length - 1)];
+
+    private void ShowCodex()
+    {
+        if (_state != GameState.Playing) return;
+        _state = GameState.Paused;
+        if (_codexPanelC != null)
+        {
+            var faces = new System.Collections.Generic.List<Sprite>();
+            for (int f = 0; f < _faceSprites.Count; f++) faces.Add(GetFaceSprite(f));
+            _codexPanelC.Refresh(faces, _codexCollected, _levelBacks, CODE_COLORS);
+        }
+        SetPanelVisible(_codexPanel, true);
+    }
+
+    private void CloseCodex()
+    {
+        SetPanelVisible(_codexPanel, false);
+        if (_state == GameState.Paused) _state = GameState.Playing;
+    }
+
+
 }

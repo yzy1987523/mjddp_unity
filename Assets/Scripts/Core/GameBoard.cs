@@ -120,4 +120,12 @@ public class GameBoard
             OnSelectionChanged?.Invoke(s, false);
         }
     }
+
+    // 消除一对：仅更新数据并通知，视图层负责播放撞击动画与销毁
+    public void RemovePair(string a, string b)
+    {
+        if (_present.ContainsKey(a)) _present[a] = false;
+        if (_present.ContainsKey(b)) _present[b] = false;
+        OnMatched?.Invoke(a, b);
+    }
 }

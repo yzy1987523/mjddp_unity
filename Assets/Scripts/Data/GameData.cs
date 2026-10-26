@@ -33,6 +33,18 @@ public class ConfigData
     public float shadow_y = 7f;
     public float layer_dx = 0f;
     public float layer_dy = 0f;
+    public float flip_dur = 0.5f;     // 牌正反面翻转动画总时长（秒）
+
+    // 以下为原 layout_debug.json 合并进来的「配对碰撞/调试」参数
+    public float crashSideOffset = 55f;   // 配对后，两张牌在中央点左右各偏移的水平距离
+    public float liftDur = 0.15f;         // 抬起并移到左右目标点的时长
+    public float collideDur = 0.14f;      // 两牌从左右目标点相撞到中央点的时长
+    public float shrinkScale = 0.3f;      // 碰撞瞬间缩放到的目标比例
+    public float shrinkDur = 0.14f;       // 缩小动画时长
+    public float flyDur = 0.45f;          // 缩小后飞向图鉴按钮的时长
+    public float pauseDur = 0.5f;         // 移到左右目标点后、相撞前的停顿时长
+
+    public bool show_offset_sliders = false; // 调试：是否显示 X/Y 层偏移滑条
 }
 
 // 生成后的一张牌（带牌面种类）。

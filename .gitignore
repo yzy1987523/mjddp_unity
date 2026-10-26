@@ -1,5 +1,6 @@
 /.vs
 /.vsconfig
+/.utmp
 /Assembly-CSharp-Editor.csproj
 /Assembly-CSharp.csproj
 /build

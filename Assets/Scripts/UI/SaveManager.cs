@@ -15,6 +15,35 @@ public static class SaveManager
         public int best = 0;
         public int maxUnlocked = 0;
         public List<int> levelBest = new List<int>();
+        public int[] codex; // 每种花色收集数（按 faceIndex），图鉴用
+        public SettingsData settings = new SettingsData();
+    }
+
+    /// <summary>
+    /// 设置界面数据：音乐/音效/震动开关、画面质量档位、语言选择。
+    /// </summary>
+    [System.Serializable]
+    public class SettingsData
+    {
+        public bool music = true;
+        public bool sfx = true;
+        public bool vibration = true;
+        public int quality = 1;   // 0=低 1=中 2=高
+        public int language = 0;  // 0=简体中文 1=English
+    }
+
+    public static SettingsData LoadSettings()
+    {
+        var d = Read();
+        if (d.settings == null) d.settings = new SettingsData();
+        return d.settings;
+    }
+
+    public static void SaveSettings(SettingsData s)
+    {
+        var d = Read();
+        d.settings = s;
+        Write(d);
     }
 
     private static ProgressData Read()
@@ -68,6 +97,19 @@ public static class SaveManager
         var d = Read();
         while (d.levelBest.Count <= idx) d.levelBest.Add(0);
         if (score > d.levelBest[idx]) d.levelBest[idx] = score;
+        Write(d);
+    }
+
+    // 图鉴：每种花色收集数（按 faceIndex）
+    public static int[] LoadCodex()
+    {
+        var d = Read();
+        return (d.codex != null) ? d.codex : new int[0];
+    }
+    public static void SaveCodex(int[] c)
+    {
+        var d = Read();
+        d.codex = c;
         Write(d);
     }
 }

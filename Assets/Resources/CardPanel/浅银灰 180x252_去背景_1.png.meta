@@ -1,10 +1,10 @@
 fileFormatVersion: 2
-guid: 13022d3cf4d44874d829994171c5cc76
+guid: 0918879071dc53d45bc0f2c3c4177d7e
 TextureImporter:
   internalIDToNameTable:
   - first:
-      213: 2958366999713007065
-    second: Quicker_20261021_180936_0
+      213: -6027163705856653077
+    second: "\u6D45\u94F6\u7070 180x252_\u53BB\u80CC\u666F_1_0"
   externalObjects: {}
   serializedVersion: 13
   mipmaps:
@@ -77,7 +77,7 @@ TextureImporter:
     textureFormat: -1
     textureCompression: 1
     compressionQuality: 50
-    crunchedCompression: 0
+    crunchedCompression: 1
     allowsAlphaSplitting: 0
     overridden: 0
     ignorePlatformSupport: 0
@@ -113,13 +113,13 @@ TextureImporter:
     serializedVersion: 2
     sprites:
     - serializedVersion: 2
-      name: Quicker_20261021_180936_0
+      name: "\u6D45\u94F6\u7070 180x252_\u53BB\u80CC\u666F_1_0"
       rect:
         serializedVersion: 2
         x: 0
-        y: 0
-        width: 496
-        height: 421
+        y: 2
+        width: 180
+        height: 250
       alignment: 0
       pivot: {x: 0, y: 0}
       border: {x: 0, y: 0, z: 0, w: 0}
@@ -128,8 +128,8 @@ TextureImporter:
       physicsShape: []
       tessellationDetail: -1
       bones: []
-      spriteID: 9d5c125bc1b3e0920800000000000000
-      internalID: 2958366999713007065
+      spriteID: be88945fa863b5ca0800000000000000
+      internalID: -6027163705856653077
       vertices: []
       indices: 
       edges: []
@@ -148,7 +148,7 @@ TextureImporter:
     spriteCustomMetadata:
       entries: []
     nameFileIdTable:
-      Quicker_20261021_180936_0: 2958366999713007065
+      "\u6D45\u94F6\u7070 180x252_\u53BB\u80CC\u666F_1_0": -6027163705856653077
   mipmapLimitGroupName: 
   pSDRemoveMatte: 0
   userData: 
