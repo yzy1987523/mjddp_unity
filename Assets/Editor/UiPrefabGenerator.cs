@@ -23,8 +23,9 @@ public class UiPrefabGenerator
         Save(BuildCodex(), "Assets/Resources/Prefab/CodexPanel.prefab");
         Save(BuildLevelItem(), "Assets/Resources/Prefab/LevelItem.prefab");
         Save(BuildCodexItem(), "Assets/Resources/Prefab/CodexItem.prefab");
+        Save(BuildGame(), "Assets/Resources/Prefab/GamePanel.prefab");
         AssetDatabase.SaveAssets();
-        Debug.Log("[UI] 已生成 Menu/Pause/Result/Level/Codex 预制体到 Resources/Prefab");
+        Debug.Log("[UI] 已生成 Menu/Pause/Result/Level/Codex/Game 预制体到 Resources/Prefab");
     }
 
     static void Save(GameObject root, string path)
@@ -163,6 +164,101 @@ public class UiPrefabGenerator
         var col = UiTools.MakeGO("Color", root.transform);
         col.GetComponent<RectTransform>().sizeDelta = new Vector2(48, 48);
         col.AddComponent<Image>().preserveAspect = true;
+        return root;
+    }
+
+    // 游戏界面（HUD）：顶栏 + 底栏 + 棋盘容器 + Toast，按钮/文本命名匹配 GameController 引用
+    [MenuItem("Tools/生成游戏界面预制体")]
+    public static void GenerateGame()
+    {
+        if (!Directory.Exists("Assets/Resources/Prefab")) Directory.CreateDirectory("Assets/Resources/Prefab");
+        Save(BuildGame(), "Assets/Resources/Prefab/GamePanel.prefab");
+        AssetDatabase.SaveAssets();
+        Debug.Log("[UI] 已生成 GamePanel.prefab 到 Resources/Prefab");
+    }
+
+    // 广告提示框：提示/洗牌次数用尽时弹出，看广告可 +1 次。确认按钮调用广告 SDK（占位）
+    [MenuItem("Tools/生成广告提示框预制体")]
+    public static void GenerateAdPrompt()
+    {
+        if (!Directory.Exists("Assets/Resources/Prefab")) Directory.CreateDirectory("Assets/Resources/Prefab");
+        Save(BuildAdPrompt(), "Assets/Resources/Prefab/AdPromptPanel.prefab");
+        AssetDatabase.SaveAssets();
+        Debug.Log("[UI] 已生成 AdPromptPanel.prefab 到 Resources/Prefab");
+    }
+
+    static GameObject BuildAdPrompt()
+    {
+        var root = UiTools.MakePanel("AdPromptPanel");
+        root.AddComponent<AdPromptPanel>();
+        UiTools.AddText(root.transform, "", 48, Color.white).name = "Title";
+        UiTools.AddText(root.transform, "", 30, Color.white).name = "Info";
+        var b1 = UiTools.AddButton(root.transform, "确认观看广告"); b1.name = "Btn_Confirm";
+        var b2 = UiTools.AddButton(root.transform, "返回"); b2.name = "Btn_Cancel";
+        return root;
+    }
+
+    static GameObject BuildGame()
+    {
+        var root = UiTools.MakePanel("GamePanel");
+        root.AddComponent<GamePanel>();
+        var gp = root.GetComponent<GamePanel>();
+
+        // 顶栏：分数 / 最高分 / 局数 / 暂停 / 图鉴
+        var top = UiTools.MakeGO("TopBar", root.transform);
+        var ttr = top.GetComponent<RectTransform>();
+        ttr.anchorMin = new Vector2(0, 1); ttr.anchorMax = new Vector2(1, 1); ttr.pivot = new Vector2(0.5f, 1);
+        ttr.sizeDelta = new Vector2(0, 80); ttr.anchoredPosition = new Vector2(0, -40);
+        var topLg = top.AddComponent<HorizontalLayoutGroup>();
+        topLg.padding = new RectOffset(16, 16, 8, 8); topLg.spacing = 24; topLg.childAlignment = TextAnchor.MiddleCenter;
+        var score = UiTools.AddText(top.transform, "分数 0", 28, Color.white); score.name = "ScoreLabel";
+        var best = UiTools.AddText(top.transform, "最高 0", 28, Color.white); best.name = "BestLabel";
+        var round = UiTools.AddText(top.transform, "第 1 局", 28, Color.white); round.name = "RoundLabel";
+        foreach (var t in new[] { score, best, round }) { var le = t.gameObject.AddComponent<LayoutElement>(); le.flexibleWidth = 1; }
+        var pause = UiTools.AddButton(top.transform, "暂停"); pause.name = "PauseBtn";
+        var codex = UiTools.AddButton(top.transform, "图鉴"); codex.name = "CodexBtn";
+        foreach (var b in new[] { pause, codex }) { var le = b.gameObject.AddComponent<LayoutElement>(); le.minHeight = 64; le.flexibleWidth = 1; }
+
+        // 底栏：提示 / 洗牌 / 重开 / 层偏移滑条（调试）
+        var bottom = UiTools.MakeGO("BottomBar", root.transform);
+        var btr = bottom.GetComponent<RectTransform>();
+        btr.anchorMin = new Vector2(0, 0); btr.anchorMax = new Vector2(1, 0); btr.pivot = new Vector2(0.5f, 0);
+        btr.sizeDelta = new Vector2(0, 96); btr.anchoredPosition = new Vector2(0, 48);
+        var botLg = bottom.AddComponent<HorizontalLayoutGroup>();
+        botLg.padding = new RectOffset(16, 16, 8, 8); botLg.spacing = 16; botLg.childAlignment = TextAnchor.MiddleCenter; botLg.childForceExpandWidth = true;
+        var hint = UiTools.AddButton(bottom.transform, "提示(5)"); hint.name = "HintBtn";
+        var shuffle = UiTools.AddButton(bottom.transform, "洗牌"); shuffle.name = "ShuffleBtn";
+        var restart = UiTools.AddButton(bottom.transform, "重开"); restart.name = "RestartBtn";
+        foreach (var b in new[] { hint, shuffle, restart }) { var le = b.gameObject.AddComponent<LayoutElement>(); le.flexibleWidth = 1; le.minHeight = 64; }
+        var xLabel = UiTools.AddText(bottom.transform, "X层偏移", 22, Color.white); xLabel.name = "XLabel";
+        var xs = UiTools.MakeGO("XOffsetSlider", bottom.transform); var xsSlider = xs.AddComponent<Slider>(); xsSlider.minValue = -40; xsSlider.maxValue = 40; xsSlider.value = 0;
+        var xle = xs.AddComponent<LayoutElement>(); xle.minHeight = 36; xle.preferredWidth = 240; xle.flexibleWidth = 1;
+        var yLabel = UiTools.AddText(bottom.transform, "Y层偏移", 22, Color.white); yLabel.name = "YLabel";
+        var ys = UiTools.MakeGO("YOffsetSlider", bottom.transform); var ysSlider = ys.AddComponent<Slider>(); ysSlider.minValue = -40; ysSlider.maxValue = 40; ysSlider.value = 0;
+        var yle = ys.AddComponent<LayoutElement>(); yle.minHeight = 36; yle.preferredWidth = 240; yle.flexibleWidth = 1;
+
+        // 棋盘容器
+        var br = UiTools.MakeGO("BoardRoot", root.transform);
+        var brtr = br.GetComponent<RectTransform>();
+        brtr.anchorMin = brtr.anchorMax = new Vector2(0.5f, 0.5f); brtr.pivot = new Vector2(0.5f, 0.5f);
+
+        // 居中提示文字
+        var toast = UiTools.MakeGO("Toast", root.transform);
+        var tts = toast.GetComponent<RectTransform>();
+        tts.anchorMin = tts.anchorMax = new Vector2(0.5f, 0.5f); tts.pivot = new Vector2(0.5f, 0.5f); tts.sizeDelta = new Vector2(420, 90);
+        var toastText = UiTools.AddText(toast.transform, "", 34, Color.white); toastText.name = "ToastText";
+
+        // 绑定到 GamePanel 组件字段（SaveAsPrefabAsset 会保存这些引用）
+        gp.topBar = top.GetComponent<RectTransform>();
+        gp.bottomBar = bottom.GetComponent<RectTransform>();
+        gp.boardRoot = br.GetComponent<RectTransform>();
+        gp.toast = toast.GetComponent<RectTransform>();
+        gp.scoreLabel = score; gp.bestLabel = best; gp.roundLabel = round; gp.toastText = toastText;
+        gp.hintBtn = hint; gp.shuffleBtn = shuffle; gp.restartBtn = restart;
+        gp.pauseBtn = pause; gp.codexBtn = codex;
+        gp.xOffsetSlider = xsSlider; gp.yOffsetSlider = ysSlider;
+        gp.xLabel = xLabel; gp.yLabel = yLabel;
+
         return root;
     }
 

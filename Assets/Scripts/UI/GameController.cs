@@ -34,6 +34,7 @@ public class GameController : MonoBehaviour
     private int _combo;
     private float _lastMatchTime;
     private int _hints;
+    private int _shuffles;
     private bool _busy;
 
     private Text _scoreLabel;
@@ -45,8 +46,14 @@ public class GameController : MonoBehaviour
     private Button _shuffleBtn;
     private Transform _uiRoot;
     private GameObject _deadlockOverlay;
+    private GameState _codexReturnState = GameState.Playing;
+    private GameState _settingsReturnState = GameState.Playing;
+    private GameObject _fade;
+    private CanvasGroup _fadeCg;
+    private bool _transitioning;
     private Button _restartBtn;
     private RectTransform _boardRoot;
+    private bool _boardFromPrefab = false;
     private Font _font;
 
     private float _layerDx;
@@ -87,7 +94,7 @@ public class GameController : MonoBehaviour
     private LevelEntry[] _levels = new LevelEntry[0];
     private int _currentLevel = 0;
     private GameObject _topBar, _bottomBar;
-    private GameObject _menuPanel, _levelPanel, _pausePanel, _resultPanel;
+    private GameObject _menuPanel, _levelPanel, _pausePanel, _resultPanel, _adPromptPanel;
     private Button _pauseBtn;
     // 面板组件引用（加载预制体后绑定）
     private MenuPanel _menuPanelC;
@@ -95,6 +102,7 @@ public class GameController : MonoBehaviour
     private PausePanel _pausePanelC;
     private ResultPanel _resultPanelC;
     private CodexPanel _codexPanelC;
+    private AdPromptPanel _adPromptPanelC;
 
     private float _nativeW;
     private float _nativeH;
@@ -284,6 +292,8 @@ public class GameController : MonoBehaviour
             es.AddComponent<InputSystemUIInputModule>();
         }
 
+        if (!LoadGamePrefab(canvasTr))
+        {
         // 顶栏：分数 / 最高分 / 局数
         var top = MakeGO("TopBar", canvasTr);
         _topBar = top;
@@ -388,9 +398,59 @@ public class GameController : MonoBehaviour
         var cLe = _codexBtn.gameObject.AddComponent<LayoutElement>();
         cLe.minHeight = 64; cLe.flexibleWidth = 1;
         _codexBtn.onClick.AddListener(ShowCodex);
+        }
 
         BuildPanels(canvasTr);
         SetGameUiVisible(false);
+        }
+
+    // 加载游戏界面（HUD）预制体；成功返回 true，缺失/无组件时返回 false（调用方回退到运行时 MakeGO）
+    private bool LoadGamePrefab(Transform parent)
+    {
+        var prefab = Resources.Load<GameObject>("Prefab/GamePanel");
+        if (prefab == null) return false;
+        var go = Instantiate(prefab, parent);
+        var gp = go.GetComponent<GamePanel>();
+        if (gp == null) { Destroy(go); return false; }
+        _topBar = gp.topBar != null ? gp.topBar.gameObject : null;
+        _bottomBar = gp.bottomBar != null ? gp.bottomBar.gameObject : null;
+        _boardRoot = gp.boardRoot;
+        _boardFromPrefab = true;
+        _toastGO = gp.toast != null ? gp.toast.gameObject : null;
+        _toast = gp.toastText;
+        _scoreLabel = gp.scoreLabel; _bestLabel = gp.bestLabel; _roundLabel = gp.roundLabel;
+        _hintBtn = gp.hintBtn; _shuffleBtn = gp.shuffleBtn; _restartBtn = gp.restartBtn;
+        _pauseBtn = gp.pauseBtn; _codexBtn = gp.codexBtn;
+        _xOffsetSlider = gp.xOffsetSlider; _yOffsetSlider = gp.yOffsetSlider;
+        float x0 = (_cfg != null) ? _cfg.layer_dx : 0f;
+        float y0 = (_cfg != null) ? _cfg.layer_dy : 0f;
+        bool showSliders = (_cfg != null) ? _cfg.show_offset_sliders : false;
+        gp.Init(OnHint, OnShuffle, OnRestart, OnPause, ShowCodex,
+                X_OFFSET_MIN, X_OFFSET_MAX, x0, v => { _layerDx = v; LayoutTiles(); },
+                Y_OFFSET_MIN, Y_OFFSET_MAX, y0, v => { _layerDy = v; LayoutTiles(); },
+                showSliders);
+        // 游戏内新增按钮：设置、返回主菜单（带黑屏过渡）。优先用预制体字段，缺失时按名字递归查找兜底
+        var settingsBtn = gp.settingsBtn ?? FindChildButton(go.transform, "SettingsBtn");
+        var backBtn = gp.backBtn ?? FindChildButton(go.transform, "BackBtn");
+        if (settingsBtn != null) settingsBtn.onClick.AddListener(ShowSettings);
+        if (backBtn != null) backBtn.onClick.AddListener(() => DoTransition(ShowMenu));
+        return true;
+    }
+
+    // 递归按名字查找子物体上的 Button（用于绑定手动添加到预制体、但未拖入组件字段的按钮）
+    private static Button FindChildButton(Transform root, string name)
+    {
+        foreach (Transform c in root)
+        {
+            if (c.name == name)
+            {
+                var b = c.GetComponent<Button>();
+                if (b != null) return b;
+            }
+            var d = FindChildButton(c, name);
+            if (d != null) return d;
+        }
+        return null;
     }
 
     // ---------- 局流程 ----------
@@ -400,7 +460,8 @@ public class GameController : MonoBehaviour
         PlayBgm(); // 游戏开始播放背景音乐
         _busy = false; // 新一局开始，清除通关/结算时的忙碌锁，恢复输入
         _round = 1;
-        _hints = HINTS_PER_ROUND;
+        _hints = 5 + _currentLevel / 5;
+        _shuffles = 5 + _currentLevel / 10;
         _combo = 0;
         BuildBoard();
         UpdateHud();
@@ -601,9 +662,13 @@ public class GameController : MonoBehaviour
         _lastScreenH = Screen.height;
         if (_boardRoot == null) return;
 
-        // 固定缩放 3（不再按屏幕自适应），牌阵整体放大 3 倍
-        _boardRoot.localScale = new Vector3(3f, 3f, 1f);
-        _boardRoot.anchoredPosition = new Vector2(0, (96f - 80f) / 2f);
+        // 固定缩放 3（不再按屏幕自适应），牌阵整体放大 3 倍。
+        // 仅运行时 MakeGO 回退路径需要；从预制体加载的 BoardRoot 尺寸/位置已由用户在编辑器设好，不再覆盖。
+        if (!_boardFromPrefab)
+        {
+            _boardRoot.localScale = new Vector3(3f, 3f, 1f);
+            _boardRoot.anchoredPosition = new Vector2(0, (96f - 80f) / 2f);
+        }
     }
 
     // ---------- 事件处理 ----------
@@ -816,7 +881,7 @@ public class GameController : MonoBehaviour
     private void OnHint()
     {
         if (_busy || _board == null) return;
-        if (_hints <= 0) { ShowToast("提示次数用尽"); return; }
+        if (_hints <= 0) { ShowAdPrompt(true); return; }
         var pair = FindHintPair();
         if (pair.Count == 0) { ShowToast("当前无可消对子"); return; }
         _hints--;
@@ -842,6 +907,9 @@ public class GameController : MonoBehaviour
     private void OnShuffle()
     {
         if (_busy || _board == null) return;
+        if (_shuffles <= 0) { ShowAdPrompt(false); return; }
+        _shuffles--;
+        UpdateHud();
         DoShuffle();
     }
 
@@ -950,7 +1018,12 @@ public class GameController : MonoBehaviour
         if (_hintBtn != null)
         {
             var txt = _hintBtn.GetComponentInChildren<Text>();
-            if (txt != null) txt.text = "提示(" + _hints + ")";
+            if (txt != null) txt.text = _hints.ToString();
+        }
+        if (_shuffleBtn != null)
+        {
+            var st = _shuffleBtn.GetComponentInChildren<Text>();
+            if (st != null) st.text = _shuffles.ToString();
         }
     }
 
@@ -1008,6 +1081,56 @@ public class GameController : MonoBehaviour
         cg.alpha = 0; cg.interactable = false; cg.blocksRaycasts = false;
     }
 
+    // 黑色蒙版：所有界面切换时黑入/黑出过渡。挂在 Canvas 下并置顶，盖住全部 UI（含 HUD/棋盘）
+    private void EnsureFade()
+    {
+        if (_fade != null) return;
+        var canvas = GetComponentInParent<Canvas>();
+        var parent = (canvas != null) ? canvas.transform : (_uiRoot != null ? _uiRoot : transform);
+        _fade = new GameObject("FadeMask", typeof(RectTransform));
+        _fade.transform.SetParent(parent, false);
+        var tr = _fade.GetComponent<RectTransform>();
+        tr.anchorMin = Vector2.zero; tr.anchorMax = Vector2.one; tr.offsetMin = Vector2.zero; tr.offsetMax = Vector2.zero;
+        var img = _fade.AddComponent<Image>();
+        img.color = Color.black; img.raycastTarget = true;
+        _fadeCg = _fade.AddComponent<CanvasGroup>();
+        _fadeCg.alpha = 0; _fadeCg.interactable = false; _fadeCg.blocksRaycasts = false;
+        _fade.transform.SetAsLastSibling();   // 置顶，覆盖所有界面
+    }
+
+    // 界面切换：黑入 → 执行 swap（切换面板/状态）→ 黑出。过渡期间蒙版拦截点击，避免打断
+    private void DoTransition(System.Action swap)
+    {
+        if (_transitioning) { swap?.Invoke(); return; }
+        StartCoroutine(Transition(swap));
+    }
+
+    private System.Collections.IEnumerator Transition(System.Action swap)
+    {
+        _transitioning = true;
+        if (_fadeCg != null) _fadeCg.blocksRaycasts = true;
+        yield return FadeTo(1f, 0.18f);
+        swap?.Invoke();
+        yield return new WaitForSeconds(0.02f);
+        yield return FadeTo(0f, 0.22f);
+        if (_fadeCg != null) _fadeCg.blocksRaycasts = false;
+        _transitioning = false;
+    }
+
+    private System.Collections.IEnumerator FadeTo(float target, float dur)
+    {
+        if (_fadeCg == null) yield break;
+        float a = _fadeCg.alpha;
+        float t = 0;
+        while (t < dur)
+        {
+            t += Time.deltaTime;
+            _fadeCg.alpha = Mathf.Lerp(a, target, Mathf.Clamp01(t / dur));
+            yield return null;
+        }
+        _fadeCg.alpha = target;
+    }
+
     private GameObject MakePanel(Transform parent, string name)
     {
         var go = MakeGO(name, parent);
@@ -1035,8 +1158,19 @@ public class GameController : MonoBehaviour
     private void ShowSettings()
     {
         if (_settingsPanel == null) return;
+        _settingsReturnState = _state;
         HideAllPanels();
         SetPanelVisible(_settingsPanel, true);
+    }
+
+    // 设置返回：从游戏内进入则回到 GamePanel（仅关闭设置面板，HUD 一直可见）；从主菜单进入则回主菜单
+    private void OnSettingsBack()
+    {
+        SetPanelVisible(_settingsPanel, false);
+        if (_settingsReturnState == GameState.Playing)
+            SetGameUiVisible(true);
+        else
+            ShowMenu();
     }
 
     // 加载设置面板预制体并实例化显示（预制体需由 Tools/生成设置面板预制体 生成；UI 已内置于 prefab）
@@ -1053,7 +1187,7 @@ public class GameController : MonoBehaviour
         EnsureCanvasGroup(_settingsPanel);
         var sp = _settingsPanel.GetComponent<SettingsPanel>();
         if (sp != null) sp.Init(_settings,
-            onBack: ShowMenu,
+            onBack: OnSettingsBack,
             onAudio: ApplyAudioSettings,
             onQuality: ApplyQualitySetting,
             onSave: () => SaveManager.SaveSettings(_settings));
@@ -1068,8 +1202,10 @@ public class GameController : MonoBehaviour
         LoadResultPrefab(parent);
         LoadCodexPrefab(parent);
         LoadSettingsPrefab(parent);
+        LoadAdPromptPrefab(parent);
 
         HideAllPanels();
+        EnsureFade();
         SetPanelVisible(_menuPanel, true);
     }
 
@@ -1081,8 +1217,8 @@ public class GameController : MonoBehaviour
         EnsureCanvasGroup(_menuPanel);
         _menuPanelC = _menuPanel.GetComponent<MenuPanel>();
         if (_menuPanelC != null) _menuPanelC.Init(
-            () => StartLevel(Mathf.Min(SaveManager.LoadMaxUnlocked(), Mathf.Max(0, _levels.Length - 1))),
-            ShowLevelSelect, ShowSettings);
+            () => DoTransition(() => StartLevel(Mathf.Min(SaveManager.LoadMaxUnlocked(), Mathf.Max(0, _levels.Length - 1)))),
+            ShowLevelSelect, ShowSettings, ShowCodex);
     }
 
     private void LoadLevelPrefab(Transform parent)
@@ -1125,6 +1261,38 @@ public class GameController : MonoBehaviour
         if (_codexPanelC != null) _codexPanelC.Init(CloseCodex);
     }
 
+    private void LoadAdPromptPrefab(Transform parent)
+    {
+        var prefab = Resources.Load<GameObject>("Prefab/AdPromptPanel");
+        if (prefab == null) { Debug.LogError("[UI] 未找到 Prefab/AdPromptPanel，请运行 Tools/生成广告提示框预制体"); _adPromptPanel = null; return; }
+        _adPromptPanel = Instantiate(prefab, parent);
+        EnsureCanvasGroup(_adPromptPanel);
+        _adPromptPanelC = _adPromptPanel.GetComponent<AdPromptPanel>();
+        if (_adPromptPanelC != null) _adPromptPanelC.Init();
+    }
+
+    // 提示/洗牌次数用尽时弹出广告框；确认则播放激励视频（占位）并 +1 次
+    private void ShowAdPrompt(bool isHint)
+    {
+        if (_adPromptPanelC == null) { ShowToast(isHint ? "提示次数用尽" : "洗牌次数用尽"); return; }
+        _adPromptPanelC.Show(isHint,
+            onConfirm: () => { CloseAdPrompt(); ShowRewardedAd(() => { if (isHint) _hints++; else _shuffles++; UpdateHud(); }); },
+            onCancel: CloseAdPrompt);
+        SetPanelVisible(_adPromptPanel, true);
+    }
+
+    private void CloseAdPrompt()
+    {
+        SetPanelVisible(_adPromptPanel, false);
+    }
+
+    // 激励视频广告占位：之后接入真实 SDK（AdMob / Unity Ads 等），看完广告回调 onReward
+    private void ShowRewardedAd(System.Action onReward)
+    {
+        Debug.Log("[Ad] 激励视频广告占位：模拟观看完成，发放奖励");
+        if (onReward != null) onReward();
+    }
+
     private void ShowMenu()
     {
         _state = GameState.Menu;
@@ -1142,7 +1310,7 @@ public class GameController : MonoBehaviour
         {
             string[] names = new string[_levels.Length];
             for (int i = 0; i < _levels.Length; i++) names[i] = _levels[i].name;
-            _levelPanelC.BuildList(names, SaveManager.LoadMaxUnlocked(), idx => StartLevel(idx));
+            _levelPanelC.BuildList(names, SaveManager.LoadMaxUnlocked(), idx => DoTransition(() => StartLevel(idx)));
         }
         SetPanelVisible(_levelPanel, true);
     }
@@ -1184,7 +1352,7 @@ public class GameController : MonoBehaviour
 
     private void OnNextLevel()
     {
-        if (_currentLevel + 1 < _levels.Length) StartLevel(_currentLevel + 1);
+        if (_currentLevel + 1 < _levels.Length) DoTransition(() => StartLevel(_currentLevel + 1));
         else ShowMenu();
     }
 
@@ -1391,8 +1559,11 @@ public class GameController : MonoBehaviour
 
     private void ShowCodex()
     {
-        if (_state != GameState.Playing) return;
+        if (_state != GameState.Playing && _state != GameState.Menu) return;
+        _codexReturnState = _state;
         _state = GameState.Paused;
+        // 从主菜单打开时先隐藏主菜单，避免图鉴面板下透出菜单
+        if (_codexReturnState == GameState.Menu && _menuPanel != null) SetPanelVisible(_menuPanel, false);
         if (_codexPanelC != null)
         {
             var faces = new System.Collections.Generic.List<Sprite>();
@@ -1405,7 +1576,9 @@ public class GameController : MonoBehaviour
     private void CloseCodex()
     {
         SetPanelVisible(_codexPanel, false);
-        if (_state == GameState.Paused) _state = GameState.Playing;
+        _state = _codexReturnState;
+        // 从主菜单打开时恢复主菜单显示
+        if (_codexReturnState == GameState.Menu && _menuPanel != null) SetPanelVisible(_menuPanel, true);
     }
 
 
