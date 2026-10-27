@@ -12,7 +12,7 @@ public static class LevelGenerator
 {
     const int DEFAULT_SEARCH_BUDGET = 500000;
     const int MAX_ATTEMPTS = 16;
-    const int MAX_FACE_TYPES = 36; // 受限于 art/card/ 下的实际牌面图数量（icon_001..icon_036）
+    const int DEFAULT_MAX_FACE_TYPES = 36; // 默认牌面种类上限（受限于 art/card/ 下的实际牌面图数量）
 
     private class PathResult
     {
@@ -35,7 +35,7 @@ public static class LevelGenerator
     private static bool _budgetHit;
     private static HashSet<string> _failed;
 
-    public static GenResult Generate(LayoutData data, int seedValue = -1, int searchBudget = DEFAULT_SEARCH_BUDGET)
+    public static GenResult Generate(LayoutData data, int seedValue = -1, int searchBudget = DEFAULT_SEARCH_BUDGET, int maxFaceTypes = DEFAULT_MAX_FACE_TYPES)
     {
         _rng = (seedValue >= 0) ? new System.Random(seedValue) : new System.Random();
         _tiles = new List<TileDef>(data.tiles);
@@ -65,7 +65,7 @@ public static class LevelGenerator
             }
 
             int pairCount = _n / 2;
-            List<int> typeCounts = ChooseTypeCounts(pairCount);
+            List<int> typeCounts = ChooseTypeCounts(pairCount, maxFaceTypes);
             var pairTypes = new List<int>();
             for (int ti = 0; ti < typeCounts.Count; ti++)
                 for (int k = 0; k < typeCounts[ti]; k++) pairTypes.Add(ti);
@@ -274,9 +274,9 @@ public static class LevelGenerator
         return new PathResult { ok = true };
     }
 
-    private static List<int> ChooseTypeCounts(int pairCount)
+    private static List<int> ChooseTypeCounts(int pairCount, int maxFaceTypes)
     {
-        int maxKinds = Math.Min(pairCount, MAX_FACE_TYPES);
+        int maxKinds = Math.Min(pairCount, maxFaceTypes);
         int kinds = _rng.Next(1, maxKinds + 1); // [1, maxKinds]
         var counts = new List<int>();
         for (int i = 0; i < kinds; i++) counts.Add(1);

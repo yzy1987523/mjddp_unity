@@ -1,6 +1,7 @@
 /.vs
 /.vsconfig
 /.utmp
+/Assets/AddressableAssetsData
 /Assembly-CSharp-Editor.csproj
 /Assembly-CSharp.csproj
 /build

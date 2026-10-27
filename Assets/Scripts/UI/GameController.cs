@@ -4,6 +4,9 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.InputSystem.UI;
 using UnityEngine.UI;
+using UnityEngine.AddressableAssets;
+using UnityEngine.ResourceManagement.AsyncOperations;
+using UnityEngine.U2D;
 
 /// <summary>
 /// 完整游戏主控制器（Godot game_session.gd 的 C# 移植）。
@@ -22,7 +25,12 @@ public class GameController : MonoBehaviour
     private Dictionary<string, TileView> _tiles = new Dictionary<string, TileView>();
 
     private GameObject _tilePrefab;
-    private Sprite _cardFront;
+    private const int FACE_TOTAL = 144;
+    private const int UNLOCK_BASE_LEVELS = 5;
+    private const int UNLOCK_BASE_COUNT = 36;
+    private const int UNLOCK_STEP_LEVELS = 5;
+    private const int UNLOCK_STEP_COUNT = 9;
+    private List<AsyncOperationHandle<Sprite>> _faceHandles;
     private Sprite[] _levelBacks = new Sprite[4];   // 等级0~3 对应的背面图（Resources/CardPanel/Level0..3）
     private Dictionary<int, Sprite> _faceSprites = new Dictionary<int, Sprite>();
     private LayoutData _layoutData;
@@ -129,7 +137,7 @@ public class GameController : MonoBehaviour
     private void Start()
     {
         _font = LoadBuiltinFont();
-        LoadResources(); // 先于 BuildUI：让 _cfg 在 BuildUI 建滑条时可用
+        LoadResources(); // 同步加载关卡/配置/音频
         _settings = SaveManager.LoadSettings(); // 提前加载：BuildUI 建设置面板时需读取开关状态
         BuildUI();
         _best = SaveManager.LoadBest();
@@ -140,6 +148,8 @@ public class GameController : MonoBehaviour
         ApplyAudioSettings();
         ApplyQualitySetting();
         ShowMenu();
+        // 牌面异步加载，不阻塞 UI：即使 Addressables 加载失败，菜单/面板仍可正常显示
+        LoadFacesAsync();
     }
 
     private void Update()
@@ -158,15 +168,9 @@ public class GameController : MonoBehaviour
         return (all != null && all.Length > 0) ? all[0] : null;
     }
 
+    // 同步加载非牌面资源（关卡/配置/音频/背面）；牌面(_faceSprites)由 LoadFacesAsync 异步从 Addressables 加载
     private void LoadResources()
     {
-        _cardFront = LoadFirstSprite("Card/card_front");
-        _faceSprites.Clear();
-        for (int i = 1; i <= 36; i++)
-        {
-            _faceSprites[i - 1] = LoadFirstSprite("Card/icon_" + i.ToString("D3"));
-        }
-
         LoadLevels();
 
         // 等级背面图：Resources/CardPanel/Level0..3.png（不同等级花色用不同背面）
@@ -208,7 +212,52 @@ public class GameController : MonoBehaviour
         _tilePrefab = Resources.Load<GameObject>("Prefab/TilePrefab");
     }
 
+    // ---------- 牌面异步加载（Addressables，每张 sprite 单独 address） ----------
+
+    // 按 address 逐张加载牌面 sprite（card_000..card_143）。
+    // 这些 sprite 已被打包进 CardAtlas 图集（includeInBuild=false），加载时自动解析到合图，draw call 受益。
+    // 注：card_front（牌底阴影图）已移除，不再加载。
+    private async void LoadFacesAsync()
+    {
+        _faceSprites.Clear();
+        if (_faceHandles != null) { foreach (var h in _faceHandles) Addressables.Release(h); }
+        _faceHandles = new List<AsyncOperationHandle<Sprite>>(FACE_TOTAL);
+        try
+        {
+            for (int i = 0; i < FACE_TOTAL; i++)
+            {
+                var h = Addressables.LoadAssetAsync<Sprite>("card_" + i.ToString("D3"));
+                await h.Task;
+                _faceHandles.Add(h);
+                _faceSprites[i] = (h.Status == AsyncOperationStatus.Succeeded) ? h.Result : null;
+            }
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError("[Addressables] 牌面加载异常：" + e.Message);
+        }
+    }
+
+    private void ReleaseAddressables()
+    {
+        if (_faceHandles != null) { foreach (var h in _faceHandles) Addressables.Release(h); _faceHandles = null; }
+    }
+
+    // 按关卡递增解锁可用牌面种类数：前 UNLOCK_BASE_LEVELS 关用前 UNLOCK_BASE_COUNT 张；
+    // 之后每 UNLOCK_STEP_LEVELS 关增加 UNLOCK_STEP_COUNT 张，封顶 FACE_TOTAL。
+    private int GetUnlockedFaceCount(int level)
+    {
+        int extra = Mathf.Max(0, level - UNLOCK_BASE_LEVELS);
+        int unlocked = UNLOCK_BASE_COUNT + (extra / UNLOCK_STEP_LEVELS) * UNLOCK_STEP_COUNT;
+        return Mathf.Min(unlocked, FACE_TOTAL);
+    }
+
     private Sprite GetFaceSprite(int idx) => (_faceSprites.ContainsKey(idx) ? _faceSprites[idx] : null);
+
+    private void OnDestroy()
+    {
+        ReleaseAddressables();
+    }
 
     // ---------- UI 构建 ----------
 
@@ -494,7 +543,8 @@ public class GameController : MonoBehaviour
         float th = _cfg.tile_height;
 
         int seed = (_levels != null && _currentLevel >= 0 && _currentLevel < _levels.Length) ? _levels[_currentLevel].seed : Random.Range(0, int.MaxValue);
-        var gen = LevelGenerator.Generate(_layoutData, seed);
+        int maxFaces = GetUnlockedFaceCount(_currentLevel);
+        var gen = LevelGenerator.Generate(_layoutData, seed, maxFaceTypes: maxFaces);
         if (!gen.ok)
         {
             Debug.LogError("GameController: 生成失败 -> " + gen.error);
@@ -530,7 +580,7 @@ public class GameController : MonoBehaviour
                 shadowImg.color = new Color(0f, 0f, 0f, 0.35f);
                 shadowImg.preserveAspect = true;
             }
-            if (shadowImg.sprite == null) shadowImg.sprite = _cardFront;
+            // 牌底阴影图由预制体 Shadow 子节点自带（半透明黑底即阴影）；card_front 已移除，不回填
             shadowImg.raycastTarget = false;
             // 牌内绘制顺序（Shadow 在最下）由预制体 RootOrder 决定，代码不再强制
 
